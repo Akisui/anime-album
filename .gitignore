@@ -1,0 +1,11 @@
+.DS_Store
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Local tooling / docs (kept locally, not published)
+.vscode/
+.claude/
+CLAUDE.md
+DESIGN.md
