@@ -6,7 +6,7 @@
   <a href="#-中文">中文</a>
 </p>
 
-A photo album app for collecting anime character images, built to feel as close as possible to Apple's native **Photos** app. iOS / iPadOS 18+, SwiftUI + SwiftData.
+A photo album app built to feel as close as possible to Apple's native **Photos** app. iOS / iPadOS 18+, SwiftUI + SwiftData.
 
 ---
 
@@ -14,7 +14,7 @@ A photo album app for collecting anime character images, built to feel as close 
 
 ### Overview
 
-AnimeAlbum is a dedicated album for anime character pictures. It has a photo stream, user-created albums, drag-to-reorder inside albums, and a full-screen viewer — all tuned to match the native Photos experience.
+AnimeAlbum is a photo album app with a photo stream, user-created albums, drag-to-reorder inside albums, and a full-screen viewer — all tuned to match the native Photos experience.
 
 ### Features
 
@@ -42,7 +42,7 @@ open AnimeAlbum.xcodeproj   # then press ⌘R
 
 - **V2** — iCloud sync across devices (private CloudKit database)
 - **V3** — PDF support (import & page-by-page browsing)
-- **V3+** — automatic character classification (on-device Vision / Core ML)
+- **V3+** — automatic classification (on-device Vision / Core ML)
 
 ---
 
@@ -50,7 +50,7 @@ open AnimeAlbum.xcodeproj   # then press ⌘R
 
 ### 概要
 
-AnimeAlbum は、アニメキャラクターの画像を集めるための専用アルバムアプリです。写真ストリーム、ユーザー作成のアルバム、アルバム内でのドラッグ並べ替え、全画面ビューアを備え、すべて iOS 標準の「写真」アプリに限りなく近い操作感を目指しています。iOS / iPadOS 18 以上、SwiftUI + SwiftData。
+AnimeAlbum は、iOS 標準の「写真」アプリに限りなく近い操作感を目指した写真アルバムアプリです。写真ストリーム、ユーザー作成のアルバム、アルバム内でのドラッグ並べ替え、全画面ビューアを備えています。iOS / iPadOS 18 以上、SwiftUI + SwiftData。
 
 ### 機能
 
@@ -78,7 +78,7 @@ open AnimeAlbum.xcodeproj   # その後 ⌘R
 
 - **V2** — 複数端末での iCloud 同期（CloudKit プライベートデータベース）
 - **V3** — PDF 対応（インポートとページ単位の閲覧）
-- **V3+** — キャラクターの自動分類（オンデバイスの Vision / Core ML）
+- **V3+** — 自動分類（オンデバイスの Vision / Core ML）
 
 ---
 
@@ -86,7 +86,7 @@ open AnimeAlbum.xcodeproj   # その後 ⌘R
 
 ### 概述
 
-AnimeAlbum 是一个专门收藏 anime 角色图片的相册 App。它有照片流、可自建相簿、相簿内可拖拽排序，以及一个全屏查看器 —— 所有交互都尽量对齐 iOS 原生「照片」App 的手感。iOS / iPadOS 18+，SwiftUI + SwiftData。
+AnimeAlbum 是一个尽量对齐 iOS 原生「照片」App 手感的相册 App。它有照片流、可自建相簿、相簿内可拖拽排序，以及一个全屏查看器。iOS / iPadOS 18+，SwiftUI + SwiftData。
 
 ### 功能
 
@@ -114,4 +114,4 @@ open AnimeAlbum.xcodeproj   # 然后按 ⌘R
 
 - **V2** — 多端 iCloud 同步（CloudKit 私有数据库）
 - **V3** — PDF 支持（导入与按页浏览）
-- **V3+** — 角色自动分类（端上 Vision / Core ML）
+- **V3+** — 自动分类（端上 Vision / Core ML）
