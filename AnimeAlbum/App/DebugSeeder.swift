@@ -21,7 +21,9 @@ enum DebugSeeder {
         guard ProcessInfo.processInfo.environment["SEED_DEMO"] == "1" else { return }
 
         if (try? context.fetchCount(FetchDescriptor<Photo>())) ?? 0 == 0 {
-            let sampleCount = 18
+            // SEED_COUNT 可覆盖数量（如 6 张验证"不满一屏"的布局）
+            let sampleCount = ProcessInfo.processInfo.environment["SEED_COUNT"]
+                .flatMap(Int.init) ?? 18
             for index in 0..<sampleCount {
                 let data = renderSampleImage(index: index, of: sampleCount)
                 let photoID = UUID()

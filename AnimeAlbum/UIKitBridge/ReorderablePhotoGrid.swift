@@ -39,6 +39,12 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
         frameBox?.lookup = { [weak coordinator] photoID in
             coordinator?.frameOfCell(photoID: photoID)
         }
+        // 未被导航栏/Home 指示条遮挡的可见区域（窗口坐标）：查看器过渡按它裁切
+        frameBox?.visibleRect = { [weak collectionView] in
+            guard let collectionView, collectionView.window != nil else { return nil }
+            let visible = collectionView.bounds.inset(by: collectionView.adjustedContentInset)
+            return collectionView.convert(visible, to: nil)
+        }
         return collectionView
     }
 

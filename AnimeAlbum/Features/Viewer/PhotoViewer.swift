@@ -10,6 +10,9 @@ final class ViewerPresenter {
         let initialIndex: Int
         /// 按照片 ID 查询其网格单元当前的全局 frame（打开起点 / 关闭落点）；不可见返回 nil
         let sourceFrame: (UUID) -> CGRect?
+        /// 网格未被 bar 遮挡的可见区域（全局坐标）：过渡图层按它裁切，
+        /// 格子被导航栏/Tab 栏遮住的部分不会在过渡中"穿透"显示到 bar 之上
+        let sourceVisibleRect: () -> CGRect?
     }
 
     private(set) var session: Session?
@@ -19,11 +22,17 @@ final class ViewerPresenter {
     /// 关闭动画完全结束（end()）时才恢复显示
     private(set) var hiddenPhotoID: UUID?
 
-    func present(photos: [Photo], index: Int, sourceFrame: @escaping (UUID) -> CGRect?) {
+    func present(
+        photos: [Photo], index: Int,
+        sourceFrame: @escaping (UUID) -> CGRect?,
+        sourceVisibleRect: @escaping () -> CGRect? = { nil }
+    ) {
         guard session == nil, photos.indices.contains(index) else { return }
         chromeHidden = false
         hiddenPhotoID = photos[index].id
-        session = Session(photos: photos, initialIndex: index, sourceFrame: sourceFrame)
+        session = Session(
+            photos: photos, initialIndex: index,
+            sourceFrame: sourceFrame, sourceVisibleRect: sourceVisibleRect)
     }
 
     func setHiddenPhoto(_ id: UUID?) {
@@ -40,11 +49,15 @@ final class ViewerPresenter {
 /// SwiftUI 网格（图库）持续上报可见单元的全局 frame
 final class CellFrameStore {
     var frames: [UUID: CGRect] = [:]
+    /// 网格未被 bar 遮挡的可见区域（全局坐标）
+    var visibleRect: CGRect?
 }
 
 /// UIKit 网格（相簿详情）向查看器提供单元 frame 查询的桥
 final class GridFrameBox {
     var lookup: ((UUID) -> CGRect?)?
+    /// 网格未被 bar 遮挡的可见区域（全局坐标）
+    var visibleRect: (() -> CGRect?)?
 }
 
 // MARK: - 查看器 overlay
@@ -74,6 +87,10 @@ struct PhotoViewerOverlay: View {
     @State private var transitionRect: CGRect = .zero
     @State private var transitionImage: UIImage?
     @State private var transitionOpacity: Double = 1
+    /// 过渡图层的裁切窗（全局坐标）：打开时从「格子 ∩ 网格可见区域」展开到全屏，
+    /// 关闭时反向收拢 —— 格子被导航栏/Tab 栏遮住的部分在过渡中保持被遮，
+    /// 从 bar 底下滑出/缩回（原生同款），而不是瞬间穿透显示到 bar 之上
+    @State private var maskRect: CGRect = .zero
     @State private var dragFitRect: CGRect = .zero
     @State private var draggingPhotoID: UUID?
     /// 拖拽开始到关闭结束期间压住查看器 bar：避免松手瞬间 bar 跟随 backdropOpacity
@@ -168,6 +185,8 @@ struct PhotoViewerOverlay: View {
                         .allowsHitTesting(phase == .presented)
 
                     if phase != .presented, let transitionImage {
+                        let mask = maskRect.isEmpty
+                            ? CGRect(origin: .zero, size: containerSize) : maskRect
                         Image(uiImage: transitionImage)
                             .resizable()
                             .scaledToFill()
@@ -176,6 +195,11 @@ struct PhotoViewerOverlay: View {
                                 height: max(transitionRect.height, 1))
                             .clipped()
                             .position(x: transitionRect.midX, y: transitionRect.midY)
+                            .mask {
+                                Rectangle()
+                                    .frame(width: max(mask.width, 1), height: max(mask.height, 1))
+                                    .position(x: mask.midX, y: mask.midY)
+                            }
                             .opacity(transitionOpacity)
                     }
                 }
@@ -358,14 +382,17 @@ struct PhotoViewerOverlay: View {
         Task { _ = await ThumbnailCache.shared.image(for: photo.id, kind: .large) }
 
         let screen = CGRect(origin: .zero, size: containerSize)
-        if let source = session.sourceFrame(photo.id), source.intersects(screen) {
+        let visible = gridVisibleRect
+        if let source = session.sourceFrame(photo.id), source.intersects(visible) {
             transitionRect = source
+            maskRect = source.intersection(visible)
             transitionOpacity = 1
             withAnimation(
                 .spring(response: 0.30 * Self.slowFactor, dampingFraction: 0.86),
                 completionCriteria: .logicallyComplete
             ) {
                 transitionRect = target
+                maskRect = screen
                 backdropOpacity = 1
             } completion: {
                 openAnimationDone = true
@@ -373,6 +400,7 @@ struct PhotoViewerOverlay: View {
             }
         } else {
             transitionRect = target.insetBy(dx: target.width * 0.06, dy: target.height * 0.06)
+            maskRect = screen
             transitionOpacity = 0
             withAnimation(
                 .easeOut(duration: 0.25 * Self.slowFactor), completionCriteria: .logicallyComplete
@@ -415,12 +443,15 @@ struct PhotoViewerOverlay: View {
         phase = .closing
 
         let screen = CGRect(origin: .zero, size: containerSize)
-        if let target = session.sourceFrame(photo.id), target.intersects(screen) {
+        let visible = gridVisibleRect
+        maskRect = screen
+        if let target = session.sourceFrame(photo.id), target.intersects(visible) {
             withAnimation(
                 .spring(response: 0.28 * Self.slowFactor, dampingFraction: 0.88),
                 completionCriteria: .logicallyComplete
             ) {
                 transitionRect = target
+                maskRect = target.intersection(visible)
                 backdropOpacity = 0
             } completion: {
                 // end() 同时恢复网格格子的显示 —— 图片"落回"格子的瞬间格子才重新出现
@@ -504,8 +535,17 @@ struct PhotoViewerOverlay: View {
         chromeSuppressed = true
         dragFitRect = fitRect(for: imageSize(of: photo, image: image), in: containerSize)
         transitionRect = dragFitRect
+        maskRect = CGRect(origin: .zero, size: containerSize)
         transitionOpacity = 1
         phase = .dragging
+    }
+
+    /// 网格未被 bar 遮挡的可见区域（全局坐标）；来源未提供时退回全屏
+    private var gridVisibleRect: CGRect {
+        let screen = CGRect(origin: .zero, size: containerSize)
+        guard let visible = session.sourceVisibleRect() else { return screen }
+        let clamped = visible.intersection(screen)
+        return clamped.isEmpty ? screen : clamped
     }
 
     // MARK: 工具

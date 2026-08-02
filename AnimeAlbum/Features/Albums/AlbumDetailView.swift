@@ -29,9 +29,10 @@ struct AlbumDetailView: View {
                         let list = photos
                         guard list.indices.contains(index) else { return }
                         let box = frameBox
-                        viewerPresenter.present(photos: list, index: index) { id in
-                            box.lookup?(id)
-                        }
+                        viewerPresenter.present(
+                            photos: list, index: index,
+                            sourceFrame: { box.lookup?($0) },
+                            sourceVisibleRect: { box.visibleRect?() })
                     },
                     onMove: { photoID, destination in
                         AlbumOperations.move(photoID: photoID, toIndex: destination, in: album, context: modelContext)
