@@ -3,16 +3,21 @@ import SwiftUI
 
 struct AlbumsView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(SelectionBarPresenter.self) private var selectionBarPresenter
     @Query(sort: \Album.sortIndex) private var albums: [Album]
 
     @State private var showingNewAlbum = false
     @State private var newAlbumName = ""
     @State private var renamingAlbum: Album?
     @State private var renameText = ""
-    @State private var deletingAlbum: Album?
+    @State private var albumsPendingDeletion: [Album] = []
     @State private var navigationPath = NavigationPath()
 
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 240), spacing: 16)]
+    @State private var isSelecting = false
+    @State private var selectedIDs: Set<UUID> = []
+
+    // iPhone 竖屏两列，iPad / 横屏按宽度自适应（DESIGN.md §6.6）
+    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 16, alignment: .top)]
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -21,7 +26,11 @@ struct AlbumsView: View {
                     ContentUnavailableView {
                         Label("没有相簿", systemImage: "rectangle.stack")
                     } description: {
-                        Text("轻点右上角的 + 创建第一个相簿。")
+                        Text("用相簿把喜欢的角色图片分门别类。")
+                    } actions: {
+                        Button("新建相簿") { promptNewAlbum() }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.capsule)
                     }
                 } else {
                     albumsGrid
@@ -31,12 +40,13 @@ struct AlbumsView: View {
             .navigationDestination(for: Album.self) { album in
                 AlbumDetailView(album: album)
             }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("新建相簿", systemImage: "plus") {
-                        newAlbumName = ""
-                        showingNewAlbum = true
-                    }
+            .toolbar { toolbarContent }
+            .onChange(of: selectedIDs) {
+                selectionBarPresenter.update(count: selectedIDs.count)
+            }
+            .onChange(of: albums.isEmpty) { _, isEmpty in
+                if isEmpty, isSelecting {
+                    exitSelectionMode()
                 }
             }
             .alert("新建相簿", isPresented: $showingNewAlbum) {
@@ -57,24 +67,29 @@ struct AlbumsView: View {
                 }
             }
             .confirmationDialog(
-                "删除相簿「\(deletingAlbum?.name ?? "")」？",
+                deleteDialogTitle,
                 isPresented: deleteDialogPresented,
                 titleVisibility: .visible
             ) {
-                Button("删除相簿", role: .destructive) {
-                    if let album = deletingAlbum {
-                        modelContext.delete(album)
-                    }
-                    deletingAlbum = nil
+                Button(albumsPendingDeletion.count > 1 ? "删除 \(albumsPendingDeletion.count) 个相簿" : "删除相簿",
+                       role: .destructive) {
+                    deletePendingAlbums()
                 }
             } message: {
                 Text("相簿中的照片不会被删除，仍保留在图库中。")
             }
             .task {
                 #if DEBUG
+                let env = ProcessInfo.processInfo.environment
                 // 调试辅助：OPEN_ALBUM=1 直接进入第一个相簿，方便自动化截图
-                if ProcessInfo.processInfo.environment["OPEN_ALBUM"] == "1", let first = albums.first {
+                if env["OPEN_ALBUM"] == "1", let first = albums.first {
                     navigationPath.append(first)
+                }
+                // ALBUMS_SELECT=n 自动进入相簿列表的选择模式并预选前 n 个
+                if let raw = env["ALBUMS_SELECT"], let count = Int(raw) {
+                    try? await Task.sleep(for: .seconds(0.6))
+                    enterSelectionMode()
+                    selectedIDs = Set(albums.prefix(count).map(\.id))
                 }
                 #endif
             }
@@ -83,25 +98,100 @@ struct AlbumsView: View {
 
     private var albumsGrid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 20) {
+            LazyVGrid(columns: columns, spacing: 24) {
                 ForEach(albums) { album in
-                    NavigationLink(value: album) {
-                        AlbumCard(album: album)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("重命名", systemImage: "pencil") {
-                            renameText = album.name
-                            renamingAlbum = album
+                    // 普通模式点按进入相簿；选择模式点按切换选中（不导航）
+                    Button {
+                        if isSelecting {
+                            toggleSelection(album)
+                        } else {
+                            navigationPath.append(album)
                         }
-                        Button("删除相簿", systemImage: "trash", role: .destructive) {
-                            deletingAlbum = album
+                    } label: {
+                        AlbumCard(album: album, isSelected: isSelecting && selectedIDs.contains(album.id))
+                    }
+                    .buttonStyle(PressableCardStyle())
+                    // 长按预览只抬起封面（与原生一致），不连带下方文字
+                    .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: AlbumCoverView.cornerRadius, style: .continuous))
+                    .contextMenu {
+                        if !isSelecting {
+                            Button("重命名", systemImage: "pencil") {
+                                renameText = album.name
+                                renamingAlbum = album
+                            }
+                            Button("删除相簿", systemImage: "trash", role: .destructive) {
+                                albumsPendingDeletion = [album]
+                            }
                         }
                     }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
+            .padding(.horizontal, 20)
+            .padding(.top, 4)
+            .padding(.bottom, 24)
+        }
+    }
+
+    /// 两种模式各用一套独立的工具栏项、整组替换（原因见 LibraryView.toolbarContent）
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if isSelecting {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("取消") { exitSelectionMode() }
+            }
+        } else {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if !albums.isEmpty {
+                    Button("选择") { enterSelectionMode() }
+                }
+                Button("新建相簿", systemImage: "plus") { promptNewAlbum() }
+            }
+        }
+    }
+
+    private func promptNewAlbum() {
+        newAlbumName = ""
+        showingNewAlbum = true
+    }
+
+    // MARK: 选择模式
+
+    private func enterSelectionMode() {
+        isSelecting = true
+        // 底部栏由 RootView 顶层渲染（覆盖 Tab 栏）；选相簿时只有删除
+        selectionBarPresenter.beginAlbums {
+            albumsPendingDeletion = albums.filter { selectedIDs.contains($0.id) }
+        }
+    }
+
+    private func exitSelectionMode() {
+        isSelecting = false
+        selectedIDs = []
+        selectionBarPresenter.end()
+    }
+
+    private func toggleSelection(_ album: Album) {
+        if selectedIDs.contains(album.id) {
+            selectedIDs.remove(album.id)
+        } else {
+            selectedIDs.insert(album.id)
+        }
+    }
+
+    private var deleteDialogTitle: String {
+        if albumsPendingDeletion.count == 1, let album = albumsPendingDeletion.first {
+            return "删除相簿「\(album.name)」？"
+        }
+        return "删除 \(albumsPendingDeletion.count) 个相簿？"
+    }
+
+    private func deletePendingAlbums() {
+        for album in albumsPendingDeletion {
+            modelContext.delete(album)
+        }
+        albumsPendingDeletion = []
+        if isSelecting {
+            exitSelectionMode()
         }
     }
 
@@ -110,7 +200,7 @@ struct AlbumsView: View {
     }
 
     private var deleteDialogPresented: Binding<Bool> {
-        Binding(get: { deletingAlbum != nil }, set: { if !$0 { deletingAlbum = nil } })
+        Binding(get: { !albumsPendingDeletion.isEmpty }, set: { if !$0 { albumsPendingDeletion = [] } })
     }
 
     private func normalizedName(_ raw: String) -> String {
@@ -122,28 +212,57 @@ struct AlbumsView: View {
 /// 相簿卡片：方形圆角封面 + 名称 + 数量（原生相册样式）
 struct AlbumCard: View {
     let album: Album
+    var isSelected = false
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 0) {
             AlbumCoverView(photo: album.coverPhoto)
+                // 勾选态与照片网格一致：白色薄罩 + 右下角徽标
+                .overlay {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: AlbumCoverView.cornerRadius, style: .continuous)
+                            .fill(Color.white.opacity(SelectionStyle.overlayOpacity))
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if isSelected {
+                        SelectionBadge()
+                            .padding(SelectionStyle.badgeInset + 3)
+                            .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    }
+                }
+                .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 1), value: isSelected)
             Text(album.name)
-                .font(.callout)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.primary)
                 .lineLimit(1)
-                .padding(.top, 6)
-            Text("\(album.photoCount)")
-                .font(.footnote)
+                .padding(.top, 8)
+            Text("\(album.photoCount) 张")
+                .font(.subheadline)
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
+                .padding(.top, 1)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
 struct AlbumCoverView: View {
+    static let cornerRadius: CGFloat = 10
+
     let photo: Photo?
 
     @State private var image: UIImage?
 
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+    }
+
     var body: some View {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
+        shape
             .fill(Color(.secondarySystemBackground))
             .aspectRatio(1, contentMode: .fit)
             .overlay {
@@ -153,11 +272,13 @@ struct AlbumCoverView: View {
                         .scaledToFill()
                 } else {
                     Image(systemName: "photo.on.rectangle")
-                        .font(.largeTitle)
+                        .font(.title)
                         .foregroundStyle(.tertiary)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .clipShape(shape)
+            // 发丝描边：浅色封面贴在白底上时也有清晰边界
+            .overlay(shape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
             .task(id: photo?.id) {
                 guard let photo else {
                     image = nil
@@ -165,5 +286,18 @@ struct AlbumCoverView: View {
                 }
                 image = await ThumbnailCache.shared.image(for: photo.id, kind: .small)
             }
+    }
+}
+
+/// 卡片按压反馈：按下即刻轻微缩小、松手回弹（临界阻尼，不过冲）；
+/// 「减弱动态效果」开启时改为降低不透明度
+struct PressableCardStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.97 : 1)
+            .opacity(configuration.isPressed && reduceMotion ? 0.7 : 1)
+            .animation(.spring(response: 0.3, dampingFraction: 1), value: configuration.isPressed)
     }
 }

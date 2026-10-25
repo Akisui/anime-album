@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 图库选择模式的底部栏状态：由 LibraryView 驱动、RootView 顶层渲染。
+/// 选择模式的底部栏状态：由图库 / 相簿详情 / 相簿列表驱动、RootView 顶层渲染。
 ///
 /// bar 画在 Tab 栏**上方**（覆盖而非替换）：安全区全程零变化，照片流不会动。
 /// 不能用「隐藏 Tab 栏 + safeAreaInset 等高替换」—— UIKit 桥接的 Tab 栏隐藏/恢复
@@ -10,24 +10,46 @@ import SwiftUI
 @Observable
 final class SelectionBarPresenter {
     struct Session {
-        var photos: [Photo]
-        let onDelete: ([Photo]) -> Void
-        let onNewAlbum: ([Photo]) -> Void
-        let onAdded: () -> Void
+        enum Kind {
+            /// 选照片：左删除 / 右「添加到相簿」（excludedAlbumID：相簿内选择时排除自身）
+            case photos(excludedAlbumID: UUID?)
+            /// 选相簿：只有删除
+            case albums
+        }
+
+        let kind: Kind
+        var count = 0
+        /// 选中的照片（.photos 时供「添加到相簿」使用）
+        var photos: [Photo] = []
+        let onDelete: () -> Void
+        var onNewAlbum: ([Photo]) -> Void = { _ in }
+        var onAdded: () -> Void = {}
     }
 
     private(set) var session: Session?
 
-    func begin(
-        onDelete: @escaping ([Photo]) -> Void,
+    func beginPhotos(
+        excludingAlbum albumID: UUID? = nil,
+        onDelete: @escaping () -> Void,
         onNewAlbum: @escaping ([Photo]) -> Void,
         onAdded: @escaping () -> Void
     ) {
-        session = Session(photos: [], onDelete: onDelete, onNewAlbum: onNewAlbum, onAdded: onAdded)
+        session = Session(
+            kind: .photos(excludedAlbumID: albumID),
+            onDelete: onDelete, onNewAlbum: onNewAlbum, onAdded: onAdded)
+    }
+
+    func beginAlbums(onDelete: @escaping () -> Void) {
+        session = Session(kind: .albums, onDelete: onDelete)
     }
 
     func update(photos: [Photo]) {
         session?.photos = photos
+        session?.count = photos.count
+    }
+
+    func update(count: Int) {
+        session?.count = count
     }
 
     func end() {
@@ -35,38 +57,47 @@ final class SelectionBarPresenter {
     }
 }
 
-/// 选择模式底部栏（覆盖在 Tab 栏之上）：左删除 / 中计数 / 右加入相簿。
+/// 选择模式底部栏（覆盖在 Tab 栏之上）：左删除 / 中计数 / 右加入相簿（仅选照片时）。
 /// 高度与 Tab 栏图标区一致（49pt），背景延伸进 Home 指示条区域；
 /// 底层铺不透明系统背景色盖住下面的 Tab 图标（材质是半透明的）。
 struct SelectionBarOverlay: View {
     let session: SelectionBarPresenter.Session
 
+    private var unit: String {
+        switch session.kind {
+        case .photos: "张照片"
+        case .albums: "个相簿"
+        }
+    }
+
     var body: some View {
         ZStack {
-            Text(session.photos.isEmpty ? "选择图片" : "选中 \(session.photos.count) 张照片")
+            SelectionCountLabel(count: session.count, unit: unit)
                 .font(.subheadline.weight(.semibold))
             HStack {
                 Button {
-                    session.onDelete(session.photos)
+                    session.onDelete()
                 } label: {
                     Image(systemName: "trash")
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
-                .disabled(session.photos.isEmpty)
+                .disabled(session.count == 0)
                 Spacer()
-                Menu {
-                    AddToAlbumMenuContent(photos: session.photos) {
-                        session.onNewAlbum(session.photos)
-                    } onAdded: {
-                        session.onAdded()
+                if case .photos(let excludedAlbumID) = session.kind {
+                    Menu {
+                        AddToAlbumMenuContent(photos: session.photos, excludingAlbumID: excludedAlbumID) {
+                            session.onNewAlbum(session.photos)
+                        } onAdded: {
+                            session.onAdded()
+                        }
+                    } label: {
+                        Image(systemName: "rectangle.stack.badge.plus")
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
-                } label: {
-                    Image(systemName: "rectangle.stack.badge.plus")
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                    .disabled(session.count == 0)
                 }
-                .disabled(session.photos.isEmpty)
             }
             .padding(.horizontal, 8)
         }
@@ -75,5 +106,13 @@ struct SelectionBarOverlay: View {
         .background(.bar)
         .background(Color(.systemBackground))
         .overlay(alignment: .top) { Divider() }
+        #if DEBUG
+        // 调试辅助：TAP_BAR_DELETE=1 出现 2s 后自动按一次删除（配合预选，验证确认框里的数量）
+        .task {
+            guard ProcessInfo.processInfo.environment["TAP_BAR_DELETE"] == "1" else { return }
+            try? await Task.sleep(for: .seconds(2))
+            session.onDelete()
+        }
+        #endif
     }
 }

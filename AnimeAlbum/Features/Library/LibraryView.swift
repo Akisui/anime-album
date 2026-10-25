@@ -12,7 +12,7 @@ struct LibraryView: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showingPhotosPicker = false
     @State private var showingFileImporter = false
-    @State private var cellFrames = CellFrameStore()
+    @State private var frameBox = GridFrameBox()
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -21,28 +21,13 @@ struct LibraryView: View {
     @State private var showingNewAlbumAlert = false
     @State private var newAlbumName = ""
 
-    #if DEBUG
-    /// SCROLL_TOP=1 调试：递增触发滚动到照片流顶部（复现"顶部 + 进出选择模式"类问题）
-    @State private var debugScrollTopTick = 0
-    #endif
-
-    // 捏合缩放列数（DESIGN.md §6.1）：三档单元格目标尺寸
-    private static let gridTargets: [CGFloat] = [76, 110, 168]
-    @State private var gridLevel = 1
-    @State private var pinchReference: CGFloat = 1
-
-    private var columns: [GridItem] {
-        let target = Self.gridTargets[gridLevel]
-        return [GridItem(.adaptive(minimum: target, maximum: target * 1.8), spacing: 2)]
-    }
-
     var body: some View {
         NavigationStack {
             content
                 .navigationTitle("图库")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { toolbarContent }
-                .overlay(alignment: .bottom) { importStatusOverlay }
+                .overlay(alignment: .bottom) { ImportStatusOverlay(importer: importer) }
                 .onChange(of: selectedIDs) {
                     selectionBarPresenter.update(photos: selectedPhotos)
                 }
@@ -51,12 +36,8 @@ struct LibraryView: View {
             #if DEBUG
             // 调试辅助：OPEN_VIEWER=1 自动打开查看器（最后一张）；OPEN_INDEX=n 打开指定序号
             // （可指向被 bar 半遮挡的格子，验证过渡裁切），方便自动化截图
+            // SCROLL_TOP=1（滚到顶部）、AUTO_ZOOM 由网格自己处理，见 ReorderablePhotoGrid
             let env = ProcessInfo.processInfo.environment
-            // SCROLL_TOP=1 先滚动到照片流顶部（顶部 + 进出选择模式的位移问题都在顶部才可见）
-            if env["SCROLL_TOP"] == "1" {
-                try? await Task.sleep(for: .seconds(1))
-                debugScrollTopTick += 1
-            }
             // AUTO_SELECT=1 自动进入选择模式，验证 Tab 栏 ↔ 选择栏原位替换（网格不位移）；
             // AUTO_CYCLES=n 自动进出选择模式 n 轮（间隔 1.2s），验证反复切换不产生位移
             if let raw = env["AUTO_CYCLES"], let cycles = Int(raw) {
@@ -120,92 +101,84 @@ struct LibraryView: View {
             ContentUnavailableView {
                 Label("没有照片", systemImage: "photo.on.rectangle.angled")
             } description: {
-                Text("轻点右上角的 + 导入第一张角色图片。")
+                Text("从照片图库或文件导入角色图片，开始你的收藏。")
+            } actions: {
+                Menu {
+                    importMenuItems
+                } label: {
+                    Text("导入照片")
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
             }
         } else {
-            ScrollViewReader { scrollProxy in
-                photoScroll
-                    #if DEBUG
-                    .onChange(of: debugScrollTopTick) {
-                        if let first = photos.first {
-                            scrollProxy.scrollTo(first.id, anchor: .top)
-                        }
-                    }
-                    #endif
-            }
+            // UICollectionView 网格（与相簿详情共用）：捏合换列逐格插值、以手指下的照片为焦点；
+            // 选择模式点选 + 滑动连选；底部锚定（进入定位到最新，导入时贴住底部）
+            ReorderablePhotoGrid(
+                photos: photos,
+                onTap: { openViewer(at: $0) },
+                contextMenu: { cellContextMenu(for: $0) },
+                frameBox: frameBox,
+                // 照片在查看器中时格子留空，关闭动画结束才恢复（原生同款逻辑）
+                hiddenPhotoID: viewerPresenter.hiddenPhotoID,
+                isSelecting: isSelecting,
+                selectedIDs: $selectedIDs,
+                allowsReordering: false,
+                anchorsToBottom: true
+            )
+            // 照片滚到导航栏 / Tab 栏下方（材质透出内容）；UIKit 按 adjustedContentInset 让出首末行
+            .ignoresSafeArea()
+            // UIKit 网格不会被 SwiftUI 识别为这一页的滚动视图，bar 不会自动切换到材质背景 ——
+            // 显式常驻材质，否则照片滚到透明 bar 下面时标题 / Tab 图标直接压在照片上
+            .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         }
     }
 
-    private var photoScroll: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(photos) { photo in
-                    PhotoGridCell(photo: photo, isSelected: isSelecting && selectedIDs.contains(photo.id))
-                        // 照片在查看器中时格子留空，关闭动画结束才恢复（原生同款逻辑）
-                        .opacity(viewerPresenter.hiddenPhotoID == photo.id ? 0 : 1)
-                        .onGeometryChange(for: CGRect.self) { proxy in
-                            proxy.frame(in: .global)
-                        } action: { frame in
-                            cellFrames.frames[photo.id] = frame
-                        }
-                        .onTapGesture { handleTap(photo) }
-                        .contextMenu {
-                            if !isSelecting {
-                                cellContextMenu(for: photo)
-                            }
-                        }
-                }
-            }
-            Text("\(photos.count) 张照片")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 24)
-        }
-        // 原生相册进入图库时定位到最新照片（列表底部）。只限定初始定位与内容增长两个角色，
-        // 不能整体 .defaultScrollAnchor(.bottom) —— 那会连"内容不满一屏"的对齐也变成底部，顶部出现空缺
-        .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(.bottom, for: .sizeChanges)
-        // 上报网格未被导航栏/Tab 栏遮挡的可见区域（全局坐标），查看器过渡按它裁切。
-        // 注意：ScrollView 的 frame(in: .global) 本身就是安全区内矩形（不含 bar 区域），
-        // 不要再减 safeAreaInsets —— 那会双重扣除、可见区域偏小
-        .onGeometryChange(for: CGRect.self) { proxy in
-            proxy.frame(in: .global)
-        } action: { rect in
-            cellFrames.visibleRect = rect
-        }
-        .simultaneousGesture(pinchToZoomColumns)
-    }
-
-    @ViewBuilder
-    private func cellContextMenu(for photo: Photo) -> some View {
-        Menu("添加到相簿", systemImage: "rectangle.stack.badge.plus") {
-            AddToAlbumMenuContent(photos: [photo]) {
-                promptNewAlbum(with: [photo])
+    /// 长按菜单：添加到相簿（现有相簿 + 新建）/ 删除
+    private func cellContextMenu(for photoID: UUID) -> [GridMenuItem] {
+        guard let photo = photos.first(where: { $0.id == photoID }) else { return [] }
+        let albums = (try? modelContext.fetch(FetchDescriptor<Album>(sortBy: [SortDescriptor(\.sortIndex)]))) ?? []
+        let albumItems = albums.map { album in
+            GridMenuItem(title: album.name, systemImage: "rectangle.stack") {
+                AlbumOperations.add([photo], to: album, in: modelContext)
+                try? modelContext.save()
             }
         }
-        Button("删除", systemImage: "trash", role: .destructive) {
-            photosPendingDeletion = [photo]
+        let newAlbum = GridMenuItem(title: "新建相簿…", systemImage: "plus") {
+            promptNewAlbum(with: [photo])
         }
+        return [
+            GridMenuItem(title: "添加到相簿", systemImage: "rectangle.stack.badge.plus",
+                         children: albumItems + [newAlbum]),
+            GridMenuItem(title: "删除", systemImage: "trash", isDestructive: true) {
+                photosPendingDeletion = [photo]
+            },
+        ]
     }
 
     // MARK: - 工具栏
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .topBarTrailing) {
-            if !photos.isEmpty {
-                Button(isSelecting ? "完成" : "选择") {
+        // 两种模式各用一套独立的工具栏项、整组替换。不要在同一组里「改按钮文字 + 删掉 +」：
+        // 点按「选择」时按钮正处于按下态，导航栏只换文字不重排，「取消」会停在原「选择」的位置，
+        // 直到下一次刷新（如点选照片）才跳到最右
+        if isSelecting {
+            ToolbarItem(placement: .topBarTrailing) {
+                // 退出选择、不做任何操作（与原生相册一致）
+                Button("取消") {
                     toggleSelectionMode()
                 }
             }
-            if !isSelecting {
+        } else {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if !photos.isEmpty {
+                    Button("选择") {
+                        toggleSelectionMode()
+                    }
+                }
                 Menu {
-                    Button("从照片图库", systemImage: "photo.on.rectangle") {
-                        showingPhotosPicker = true
-                    }
-                    Button("从文件", systemImage: "folder") {
-                        showingFileImporter = true
-                    }
+                    importMenuItems
                 } label: {
                     Label("导入", systemImage: "plus")
                 }
@@ -213,55 +186,18 @@ struct LibraryView: View {
         }
     }
 
-
-    // MARK: - 导入状态
-
     @ViewBuilder
-    private var importStatusOverlay: some View {
-        if importer.isImporting {
-            VStack(spacing: 6) {
-                ProgressView(value: Double(importer.completed), total: Double(max(importer.total, 1)))
-                Text("正在导入 \(importer.completed)/\(importer.total)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(12)
-            .frame(maxWidth: 280)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .padding(.bottom, 12)
-        } else if let summary = importer.summary {
-            Text(summary)
-                .font(.footnote)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(.regularMaterial, in: Capsule())
-                .padding(.bottom, 12)
-                .task {
-                    try? await Task.sleep(for: .seconds(2.5))
-                    importer.summary = nil
-                }
+    private var importMenuItems: some View {
+        Button("从照片图库", systemImage: "photo.on.rectangle") {
+            showingPhotosPicker = true
+        }
+        Button("从文件", systemImage: "folder") {
+            showingFileImporter = true
         }
     }
 
-    // MARK: - 交互
 
-    /// 捏合切换网格档位：放大手势 → 更大的单元格（更少列），反之亦然
-    private var pinchToZoomColumns: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                let ratio = value.magnification / pinchReference
-                if ratio > 1.3, gridLevel < Self.gridTargets.count - 1 {
-                    pinchReference = value.magnification
-                    withAnimation(.snappy) { gridLevel += 1 }
-                } else if ratio < 0.75, gridLevel > 0 {
-                    pinchReference = value.magnification
-                    withAnimation(.snappy) { gridLevel -= 1 }
-                }
-            }
-            .onEnded { _ in
-                pinchReference = 1
-            }
-    }
+    // MARK: - 交互
 
     private var selectedPhotos: [Photo] {
         photos.filter { selectedIDs.contains($0.id) }
@@ -274,24 +210,13 @@ struct LibraryView: View {
         )
     }
 
-    private func handleTap(_ photo: Photo) {
-        if isSelecting {
-            if selectedIDs.contains(photo.id) {
-                selectedIDs.remove(photo.id)
-            } else {
-                selectedIDs.insert(photo.id)
-            }
-        } else if let index = photos.firstIndex(where: { $0.id == photo.id }) {
-            openViewer(at: index)
-        }
-    }
-
     private func openViewer(at index: Int) {
-        let store = cellFrames
+        guard photos.indices.contains(index) else { return }
+        let box = frameBox
         viewerPresenter.present(
             photos: photos, index: index,
-            sourceFrame: { store.frames[$0] },
-            sourceVisibleRect: { store.visibleRect })
+            sourceFrame: { box.lookup?($0) },
+            sourceVisibleRect: { box.visibleRect?() })
     }
 
     private func toggleSelectionMode() {
@@ -300,8 +225,8 @@ struct LibraryView: View {
         } else {
             isSelecting = true
             // 底部选择栏由 RootView 顶层渲染（覆盖 Tab 栏、安全区零变化），这里只驱动状态
-            selectionBarPresenter.begin(
-                onDelete: { photosPendingDeletion = $0 },
+            selectionBarPresenter.beginPhotos(
+                onDelete: { [selectionBarPresenter] in photosPendingDeletion = selectionBarPresenter.session?.photos ?? [] },
                 onNewAlbum: { promptNewAlbum(with: $0) },
                 onAdded: { exitSelectionMode() })
         }
@@ -345,17 +270,19 @@ struct AddToAlbumMenuContent: View {
     @Query(sort: \Album.sortIndex) private var albums: [Album]
 
     let photos: [Photo]
+    /// 不列出的相簿（在相簿内选择时排除它自己）
+    var excludingAlbumID: UUID?
     var onNewAlbum: () -> Void
     var onAdded: (() -> Void)?
 
     var body: some View {
-        ForEach(albums) { album in
+        ForEach(albums.filter { $0.id != excludingAlbumID }) { album in
             Button(album.name, systemImage: "rectangle.stack") {
                 AlbumOperations.add(photos, to: album, in: modelContext)
                 onAdded?()
             }
         }
-        if !albums.isEmpty {
+        if albums.contains(where: { $0.id != excludingAlbumID }) {
             Divider()
         }
         Button("新建相簿…", systemImage: "plus") {

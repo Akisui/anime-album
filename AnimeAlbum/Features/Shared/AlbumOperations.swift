@@ -21,10 +21,14 @@ enum AlbumOperations {
         return album
     }
 
-    static func add(_ photos: [Photo], to album: Album, in context: ModelContext) {
-        let existingIDs = Set(album.sortedPhotos.map(\.id))
+    /// 追加到相簿末尾（已在相簿里的跳过），返回实际新加入的张数
+    @discardableResult
+    static func add(_ photos: [Photo], to album: Album, in context: ModelContext) -> Int {
+        var existingIDs = Set(album.sortedPhotos.map(\.id))
         var index = album.sortedEntries.last?.sortIndex ?? 0
-        for photo in photos where !existingIDs.contains(photo.id) {
+        var added = 0
+        for photo in photos where existingIDs.insert(photo.id).inserted {
+            added += 1
             index += SortIndexing.gap
             let entry = AlbumEntry()
             context.insert(entry)
@@ -33,6 +37,7 @@ enum AlbumOperations {
             entry.addedAt = .now
             entry.sortIndex = index
         }
+        return added
     }
 
     /// 拖拽排序（DESIGN.md §4.4）：toIndex 为移动后在相簿内的最终位置。
@@ -63,6 +68,8 @@ enum AlbumOperations {
         } else {
             moved.sortIndex = newIndex
         }
+        // 立即落盘：自动保存有延迟，排完序马上被系统杀掉（或模拟器直接终止）会丢掉这次排序（实测）
+        try? context.save()
     }
 
     static func remove(_ photo: Photo, from album: Album, in context: ModelContext) {

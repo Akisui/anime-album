@@ -16,7 +16,14 @@ final class ThumbnailCache: @unchecked Sendable {
         if let cached = cache.object(forKey: key) {
             return cached
         }
-        guard let image = store.loadThumbnail(photoID: photoID, kind: kind) else { return nil }
+        let loaded: UIImage?
+        if kind == .tiny {
+            loaded = await store.loadTinyThumbnail(photoID: photoID)
+        } else {
+            await store.ensureThumbnail(photoID: photoID, kind: kind)
+            loaded = store.loadThumbnail(photoID: photoID, kind: kind)
+        }
+        guard let image = loaded else { return nil }
         let pixelCount = Int(image.size.width * image.scale * image.size.height * image.scale)
         cache.setObject(image, forKey: key, cost: pixelCount * 4)
         return image

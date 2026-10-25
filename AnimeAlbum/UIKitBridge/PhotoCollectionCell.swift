@@ -1,0 +1,228 @@
+import UIKit
+
+/// UIKit 照片网格共用的单元：正方形 aspectFill 缩略图 + 可选的勾选态
+/// （相簿详情的排序网格、「添加到相簿」选择器）
+final class PhotoCollectionCell: UICollectionViewCell {
+    private let imageView = UIImageView()
+    /// 当前显示的缩略图（长按菜单的预览先用它占位）
+    var currentImage: UIImage? { imageView.image }
+    private let tintOverlay = UIView()
+    /// 勾选徽标：第一次被勾选时才创建 —— 进出最密档时一帧要新建几百个格子，
+    /// 每格都带一个 Auto Layout 搭的徽标会明显卡顿
+    private var badge: SelectionBadgeView?
+    private var loadTask: Task<Void, Never>?
+    /// 徽标随格子缩小的比例：最密档（~25pt 的格子）上原尺寸 22pt 的徽标几乎盖满整格
+    private var badgeScale: CGFloat = 1
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.backgroundColor = .secondarySystemBackground
+
+        imageView.frame = contentView.bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        contentView.addSubview(imageView)
+
+        tintOverlay.frame = contentView.bounds
+        tintOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        tintOverlay.backgroundColor = UIColor.white.withAlphaComponent(SelectionStyle.overlayOpacity)
+        tintOverlay.isHidden = true
+        contentView.addSubview(tintOverlay)
+
+
+        isAccessibilityElement = true
+        accessibilityLabel = "照片"
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// kind：格子尺寸对应的缩略图（最密档用 tiny，其余 small）
+    func configure(photoID: UUID, kind: ThumbnailKind = .small) {
+        loadTask?.cancel()
+        // 内存缓存命中时同步显示：换布局 / 快速滚动时新出现的格子不先闪灰
+        if let cached = ThumbnailCache.shared.cachedImage(for: photoID, kind: kind) {
+            imageView.image = cached
+            return
+        }
+        // 目标尺寸未缓存时先拿另一种尺寸的缓存图顶上（如进出最密档时 tiny ↔ small），加载完再换
+        imageView.image = [ThumbnailKind.small, .tiny].lazy
+            .compactMap { ThumbnailCache.shared.cachedImage(for: photoID, kind: $0) }
+            .first
+        loadTask = Task { [weak self] in
+            let image = await ThumbnailCache.shared.image(for: photoID, kind: kind)
+            guard let self, !Task.isCancelled, let image else { return }
+            self.imageView.image = image
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let size = contentView.bounds.size
+        badgeScale = min(1, max(0.5, size.width / 72))
+        guard let badge else { return }
+        let diameter = SelectionStyle.badgeDiameter
+        let inset = SelectionStyle.badgeInset * badgeScale
+        badge.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+        badge.center = CGPoint(
+            x: size.width - inset - diameter * badgeScale / 2,
+            y: size.height - inset - diameter * badgeScale / 2)
+        if badge.layer.animationKeys()?.isEmpty ?? true {
+            badge.transform = CGAffineTransform(scaleX: badgeScale, y: badgeScale)
+        }
+    }
+
+    private func makeBadgeIfNeeded() -> SelectionBadgeView {
+        if let badge {
+            return badge
+        }
+        let badge = SelectionBadgeView()
+        contentView.addSubview(badge)
+        self.badge = badge
+        setNeedsLayout()
+        layoutIfNeeded()
+        return badge
+    }
+
+    /// 勾选态：白色薄罩 + 右下角徽标。选中时徽标从 0.6 倍弹到原大（临界阻尼、无回弹），
+    /// 「减弱动态效果」开启时直接切换
+    func setChecked(_ checked: Bool, animated: Bool) {
+        accessibilityTraits = checked ? [.image, .selected] : .image
+        let wasChecked = !tintOverlay.isHidden
+        guard checked != wasChecked else { return }
+
+        tintOverlay.isHidden = !checked
+        guard checked || badge != nil else { return }
+        let badge = makeBadgeIfNeeded()
+        badge.isHidden = !checked
+        let resting = CGAffineTransform(scaleX: badgeScale, y: badgeScale)
+        guard checked, animated, !UIAccessibility.isReduceMotionEnabled else {
+            badge.transform = resting
+            return
+        }
+        badge.transform = resting.scaledBy(x: 0.6, y: 0.6)
+        UIView.animate(withDuration: 0.25, delay: 0, usingSpringWithDamping: 1, initialSpringVelocity: 0) {
+            badge.transform = resting
+        }
+    }
+
+    // MARK: 浮起
+
+    /// 长按按下后的浮起（震动前就开始、落回动画结束前）：状态存在格子上，期间布局刷新（apply）不会把它冲掉 ——
+    /// 否则投影被按 zIndex 清零、zPosition 被重设为 0 而被邻格盖住，下一次置顶时又闪出来（真机实测）
+    private var isPressLifted = false
+    /// 浮起到落回动画结束：期间保持置顶
+    private var isElevated = false
+    private static let liftedTransform = CGAffineTransform(scaleX: 1.1, y: 1.1)
+    private static let liftedShadowOpacity: Float = 0.3
+
+    /// 浮起 / 落回：1.1 倍 + 投影，与交互式移动的布局属性（PhotoGridCompositionalLayout）一致，交接无跳变
+    func setPressLifted(_ lifted: Bool, duration: TimeInterval) {
+        isPressLifted = lifted
+        if lifted {
+            isElevated = true
+            layer.zPosition = CGFloat(PhotoGridCompositionalLayout.liftedZIndex)
+        }
+        let animated = duration > 0 && !UIAccessibility.isReduceMotionEnabled
+        setShadowOpacity(lifted ? Self.liftedShadowOpacity : 0, duration: animated ? duration : 0)
+        let transform = lifted ? Self.liftedTransform : .identity
+        let finish: (Bool) -> Void = { [weak self] _ in
+            guard let self, !self.isPressLifted else { return }
+            self.isElevated = false
+            self.layer.zPosition = 0
+        }
+        guard animated else {
+            self.transform = transform
+            finish(true)
+            return
+        }
+        UIView.animate(withDuration: duration, delay: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState, .curveEaseOut],
+                       animations: { self.transform = transform }, completion: finish)
+    }
+
+    /// 投影从当前显示值渐变到目标值（layer 属性不随 UIView 动画块变化，显式加动画）
+    private func setShadowOpacity(_ opacity: Float, duration: TimeInterval) {
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOffset = CGSize(width: 0, height: 6)
+        layer.shadowRadius = 12
+        layer.shadowPath = UIBezierPath(rect: bounds).cgPath
+        let from = layer.presentation()?.shadowOpacity ?? layer.shadowOpacity
+        layer.removeAnimation(forKey: "liftShadow")
+        layer.shadowOpacity = opacity
+        guard duration > 0, from != opacity else { return }
+        let animation = CABasicAnimation(keyPath: "shadowOpacity")
+        animation.fromValue = from
+        animation.toValue = opacity
+        animation.duration = duration
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(animation, forKey: "liftShadow")
+    }
+
+    /// 长按排序被拖起时（布局给的 zIndex 置顶）显示投影，落下恢复；手动浮起期间以浮起状态为准
+    override func apply(_ layoutAttributes: UICollectionViewLayoutAttributes) {
+        super.apply(layoutAttributes)
+        if isElevated {
+            layer.zPosition = CGFloat(PhotoGridCompositionalLayout.liftedZIndex)
+            if isPressLifted, layoutAttributes.transform.isIdentity {
+                transform = Self.liftedTransform
+            }
+            return
+        }
+        let lifted = layoutAttributes.zIndex >= PhotoGridCompositionalLayout.liftedZIndex
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOffset = CGSize(width: 0, height: 6)
+        layer.shadowRadius = 12
+        layer.shadowOpacity = lifted ? Self.liftedShadowOpacity : 0
+        layer.shadowPath = lifted ? UIBezierPath(rect: bounds).cgPath : nil
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        loadTask?.cancel()
+        imageView.image = nil
+        tintOverlay.isHidden = true
+        badge?.isHidden = true
+        badge?.transform = CGAffineTransform(scaleX: badgeScale, y: badgeScale)
+        isPressLifted = false
+        isElevated = false
+        layer.removeAnimation(forKey: "liftShadow")
+        layer.shadowOpacity = 0
+        layer.zPosition = 0
+        transform = .identity
+    }
+}
+
+/// 右下角选中徽标（UIKit 版，与 SwiftUI 的 SelectionBadge 同一套尺寸/配色）
+final class SelectionBadgeView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        let diameter = SelectionStyle.badgeDiameter
+        backgroundColor = .tintColor
+        layer.cornerRadius = diameter / 2
+        layer.borderWidth = SelectionStyle.badgeRingWidth
+        layer.borderColor = UIColor.white.cgColor
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.25
+        layer.shadowRadius = 2
+        layer.shadowOffset = CGSize(width: 0, height: 1)
+
+        let check = UIImageView(
+            image: UIImage(
+                systemName: "checkmark",
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: diameter * 0.45, weight: .bold)))
+        check.tintColor = .white
+        check.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(check)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: diameter),
+            heightAnchor.constraint(equalToConstant: diameter),
+            check.centerXAnchor.constraint(equalTo: centerXAnchor),
+            check.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+}

@@ -86,10 +86,11 @@
 				};
 			};
 			buildConfigurationList = 1A000000000000000000000A /* Build configuration list for PBXProject "AnimeAlbum" */;
-			developmentRegion = en;
+			developmentRegion = "zh-Hans";
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
+				"zh-Hans",
 				Base,
 			);
 			mainGroup = 1A0000000000000000000001;

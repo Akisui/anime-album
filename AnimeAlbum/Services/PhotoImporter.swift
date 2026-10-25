@@ -13,14 +13,25 @@ final class PhotoImporter {
     private(set) var total = 0
     var summary: String?
 
-    func importPickerItems(_ items: [PhotosPickerItem], context: ModelContext) async {
+    /// 一次导入的结果：photos 为这批选择对应的照片（新导入的 + 图库中已有的重复项，按选择顺序、去重），
+    /// 供「相簿里直接导入」把它们加入相簿
+    struct ImportResult {
+        var photos: [Photo] = []
+        var imported = 0
+        var duplicates = 0
+        var failed = 0
+    }
+
+    @discardableResult
+    func importPickerItems(_ items: [PhotosPickerItem], context: ModelContext) async -> ImportResult {
         await runImport(count: items.count, context: context) { index in
             guard let data = try await items[index].loadTransferable(type: Data.self) else { return nil }
             return (data, nil)
         }
     }
 
-    func importFiles(at urls: [URL], context: ModelContext) async {
+    @discardableResult
+    func importFiles(at urls: [URL], context: ModelContext) async -> ImportResult {
         await runImport(count: urls.count, context: context) { index in
             let url = urls[index]
             let accessing = url.startAccessingSecurityScopedResource()
@@ -35,27 +46,35 @@ final class PhotoImporter {
         count: Int,
         context: ModelContext,
         payload: (Int) async throws -> (data: Data, filename: String?)?
-    ) async {
-        guard count > 0, !isImporting else { return }
+    ) async -> ImportResult {
+        guard count > 0, !isImporting else { return ImportResult() }
         isImporting = true
         total = count
         completed = 0
 
-        var imported = 0
-        var duplicates = 0
-        var failed = 0
-        var knownHashes = Set(((try? context.fetch(FetchDescriptor<Photo>())) ?? []).map(\.contentHash))
+        var result = ImportResult()
+        var resultIDs = Set<UUID>()
+        // 去重靠内容哈希（DESIGN.md §5.1）：命中已有照片时不重复导入，但仍把已有的那张算进结果
+        var photosByHash = Dictionary(
+            ((try? context.fetch(FetchDescriptor<Photo>())) ?? []).map { ($0.contentHash, $0) },
+            uniquingKeysWith: { first, _ in first })
+        func appendResult(_ photo: Photo) {
+            if resultIDs.insert(photo.id).inserted {
+                result.photos.append(photo)
+            }
+        }
 
         for index in 0..<count {
             defer { completed += 1 }
             do {
                 guard let (data, filename) = try await payload(index) else {
-                    failed += 1
+                    result.failed += 1
                     continue
                 }
                 let hash = await Self.contentHash(of: data)
-                guard !knownHashes.contains(hash) else {
-                    duplicates += 1
+                if let existing = photosByHash[hash] {
+                    result.duplicates += 1
+                    appendResult(existing)
                     continue
                 }
                 let photoID = UUID()
@@ -69,20 +88,22 @@ final class PhotoImporter {
                 photo.height = stored.height
                 photo.originalFilename = filename
                 context.insert(photo)
-                knownHashes.insert(hash)
-                imported += 1
+                photosByHash[hash] = photo
+                appendResult(photo)
+                result.imported += 1
             } catch {
-                failed += 1
+                result.failed += 1
             }
         }
 
         try? context.save()
         isImporting = false
 
-        var parts = ["已导入 \(imported) 张"]
-        if duplicates > 0 { parts.append("跳过重复 \(duplicates) 张") }
-        if failed > 0 { parts.append("失败 \(failed) 张") }
+        var parts = ["已导入 \(result.imported) 张"]
+        if result.duplicates > 0 { parts.append("跳过重复 \(result.duplicates) 张") }
+        if result.failed > 0 { parts.append("失败 \(result.failed) 张") }
         summary = parts.joined(separator: "，")
+        return result
     }
 
     // nonisolated async：在全局并发执行器上运行，避免主线程做哈希/编码
