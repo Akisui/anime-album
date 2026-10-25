@@ -10,6 +10,8 @@ final class PhotoCollectionCell: UICollectionViewCell {
     /// 勾选徽标：第一次被勾选时才创建 —— 进出最密档时一帧要新建几百个格子，
     /// 每格都带一个 Auto Layout 搭的徽标会明显卡顿
     private var badge: SelectionBadgeView?
+    /// PDF 标记（左下角「PDF · 页数」）：同样懒创建
+    private var documentBadge: UILabel?
     private var loadTask: Task<Void, Never>?
     /// 徽标随格子缩小的比例：最密档（~25pt 的格子）上原尺寸 22pt 的徽标几乎盖满整格
     private var badgeScale: CGFloat = 1
@@ -30,6 +32,9 @@ final class PhotoCollectionCell: UICollectionViewCell {
         tintOverlay.isHidden = true
         contentView.addSubview(tintOverlay)
 
+
+        // iPad 指针悬停高亮
+        hoverStyle = UIHoverStyle(effect: .highlight, shape: .rect(cornerRadius: 0))
 
         isAccessibilityElement = true
         accessibilityLabel = "照片"
@@ -57,9 +62,44 @@ final class PhotoCollectionCell: UICollectionViewCell {
         }
     }
 
+    /// PDF 显示左下角标记（页数）；图片传 nil
+    func setDocumentPageCount(_ pageCount: Int?) {
+        // PDF 页面多为白底，与网格背景融在一起：加一圈细边
+        contentView.layer.borderWidth = pageCount == nil ? 0 : 1 / max(traitCollection.displayScale, 1)
+        contentView.layer.borderColor = UIColor.separator.cgColor
+        guard let pageCount else {
+            documentBadge?.isHidden = true
+            return
+        }
+        let label = documentBadge ?? makeDocumentBadge()
+        label.text = pageCount > 1 ? "PDF · \(pageCount)" : "PDF"
+        label.isHidden = false
+        setNeedsLayout()
+    }
+
+    private func makeDocumentBadge() -> UILabel {
+        let label = UILabel()
+        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = .white
+        label.textAlignment = .center
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        label.layer.cornerRadius = 4
+        label.layer.cornerCurve = .continuous
+        label.clipsToBounds = true
+        contentView.insertSubview(label, belowSubview: tintOverlay)
+        documentBadge = label
+        return label
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         let size = contentView.bounds.size
+        if let documentBadge, !documentBadge.isHidden {
+            // 最密档格子太小，不显示
+            documentBadge.alpha = size.width >= 48 ? 1 : 0
+            let textSize = documentBadge.intrinsicContentSize
+            documentBadge.frame = CGRect(x: 4, y: size.height - 4 - 16, width: textSize.width + 10, height: 16)
+        }
         badgeScale = min(1, max(0.5, size.width / 72))
         guard let badge else { return }
         let diameter = SelectionStyle.badgeDiameter

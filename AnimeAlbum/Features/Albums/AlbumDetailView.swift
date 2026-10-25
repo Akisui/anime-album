@@ -15,6 +15,7 @@ struct AlbumDetailView: View {
     @State private var showingFileImporter = false
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var frameBox = GridFrameBox()
+    @State private var openPDF: Photo?
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -54,9 +55,16 @@ struct AlbumDetailView: View {
                     onTap: { index in
                         let list = photos
                         guard list.indices.contains(index) else { return }
+                        if list[index].isPDF {
+                            openPDF = list[index]
+                            return
+                        }
+                        // 查看器只翻图片，PDF 走阅读器
+                        let images = list.filter { !$0.isPDF }
+                        guard let imageIndex = images.firstIndex(where: { $0.id == list[index].id }) else { return }
                         let box = frameBox
                         viewerPresenter.present(
-                            photos: list, index: index,
+                            photos: images, index: imageIndex,
                             sourceFrame: { box.lookup?($0) },
                             sourceVisibleRect: { box.visibleRect?() })
                     },
@@ -89,6 +97,7 @@ struct AlbumDetailView: View {
                 exitSelectionMode()
             }
         }
+        .fullScreenCover(item: $openPDF) { PDFReaderView(photo: $0) }
         .sheet(isPresented: $showingPicker) {
             AlbumPhotoPickerSheet(album: album)
         }
@@ -100,7 +109,7 @@ struct AlbumDetailView: View {
         }
         .fileImporter(
             isPresented: $showingFileImporter,
-            allowedContentTypes: [.image],
+            allowedContentTypes: PhotoImporter.importableTypes,
             allowsMultipleSelection: true
         ) { result in
             if case .success(let urls) = result {
@@ -108,6 +117,11 @@ struct AlbumDetailView: View {
             }
         }
         .overlay(alignment: .bottom) { ImportStatusOverlay(importer: importer) }
+        // 从其他 App 拖图片进来：先进图库（去重）再加入本相簿
+        .onDrop(of: PhotoImporter.importableTypes, isTargeted: nil) { providers in
+            Task { addImported(await importer.importItemProviders(providers, context: modelContext)) }
+            return true
+        }
         .confirmationDialog(
             "\(photosPendingRemoval.count) 张照片",
             isPresented: removalDialogPresented,
@@ -152,6 +166,11 @@ struct AlbumDetailView: View {
     /// 长按菜单：设为封面 / 从相簿中移除
     private func cellContextMenu(for photoID: UUID) -> [GridMenuItem] {
         [
+            GridMenuItem(title: "分享", systemImage: "square.and.arrow.up") {
+                if let photo = photos.first(where: { $0.id == photoID }) {
+                    PhotoSharing.share([photo])
+                }
+            },
             GridMenuItem(title: "设为封面", systemImage: "photo.badge.checkmark") {
                 album.coverPhotoID = photoID
                 try? modelContext.save()

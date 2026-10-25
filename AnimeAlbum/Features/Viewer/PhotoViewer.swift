@@ -107,6 +107,12 @@ struct PhotoViewerOverlay: View {
     /// 打开时（状态栏可见）捕获的状态栏高度，作为稳定值：进入沉浸后状态栏隐藏、
     /// statusBarFrame 会变 0，若实时读取会导致 bar 布局与滑出距离塌陷
     @State private var stableSafeTop: CGFloat = 0
+    /// 底部安全区（Home 指示条）高度：胶片条在其上方，同样在打开时捕获一次
+    @State private var stableSafeBottom: CGFloat = 0
+    /// 胶片条居中的照片（与翻页器双向同步：翻页 → 胶片条滚到当前张；拖动胶片条 → 翻页器跟着换图）
+    @State private var filmstripID: UUID?
+    /// 用户正在拖动 / 惯性滚动胶片条：此时当前张不展开（宽度变化会让滚动位置跳）
+    @State private var isScrubbing = false
     @State private var openAnimationDone = false
     @State private var readyPages: Set<UUID> = []
     @State private var zoomedPages: Set<UUID> = []
@@ -120,6 +126,9 @@ struct PhotoViewerOverlay: View {
 
     /// bar 高度对齐系统 inline 导航栏（44pt），使查看器 bar 底边与缩略图页 bar 底边一致
     private static let barHeight: CGFloat = 44
+    /// 底部胶片条（DESIGN.md §6.3）：bar 高度、缩略图尺寸
+    private static let filmstripHeight: CGFloat = 52
+    private static let filmstripItemSize = CGSize(width: 28, height: 40)
 
     /// 状态栏高度（实时读取）。系统导航栏把内容放在状态栏下方（而非完整 safeArea 下方，
     /// 后者约大 5.7pt）；仅在打开时捕获一次存入 stableSafeTop，之后一律用稳定值
@@ -132,6 +141,14 @@ struct PhotoViewerOverlay: View {
             return h
         }
         return scene?.windows.first { $0.isKeyWindow }?.safeAreaInsets.top ?? 0
+    }
+
+    private var liveBottomInset: CGFloat {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        return scene?.windows.first { $0.isKeyWindow }?.safeAreaInsets.bottom ?? 0
     }
 
     /// 顶部 bar 底边的屏幕 Y（状态栏 + bar 高度）；用稳定值，不受沉浸后状态栏隐藏影响
@@ -226,6 +243,12 @@ struct PhotoViewerOverlay: View {
                     .offset(y: chromeOffsetY)
                     .allowsHitTesting(chromeInteractive)
                 Spacer(minLength: 0)
+                // 胶片条与顶部 bar 同一套显隐：共读 chromeOpacity（淡出）、滑动式隐藏时向下移出
+                filmstrip
+                    .compositingGroup()
+                    .opacity(chromeOpacity)
+                    .offset(y: (presenter.chromeHidden && chromeSlides) ? Self.filmstripHeight + stableSafeBottom : 0)
+                    .allowsHitTesting(chromeInteractive)
             }
             .ignoresSafeArea()
         }
@@ -338,6 +361,16 @@ struct PhotoViewerOverlay: View {
                     .contentShape(Rectangle())
             }
             Spacer()
+            Button {
+                PhotoSharing.share([currentPhoto])
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("分享")
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity)
@@ -351,6 +384,78 @@ struct PhotoViewerOverlay: View {
                 Color.black.opacity(barOverImage ? 0 : immersiveAmount)
             }
         }
+    }
+
+    // MARK: 胶片条
+
+    /// 当前张展开为原始比例（拖动中不展开）
+    private var expandedFilmstripID: UUID? {
+        isScrubbing ? nil : currentPhoto.id
+    }
+
+    private var filmstrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 2) {
+                ForEach(session.photos, id: \.id) { photo in
+                    FilmstripThumbnail(
+                        photo: photo, itemSize: Self.filmstripItemSize,
+                        expanded: photo.id == expandedFilmstripID)
+                    .id(photo.id)
+                    .contentShape(Rectangle())
+                    .onTapGesture { jumpFromFilmstrip(to: photo.id) }
+                }
+            }
+            .scrollTargetLayout()
+            .animation(.easeOut(duration: 0.2), value: expandedFilmstripID)
+        }
+        // 首尾两张也能滚到正中
+        .contentMargins(.horizontal, max(containerSize.width / 2 - Self.filmstripItemSize.width / 2, 0),
+                        for: .scrollContent)
+        .scrollPosition(id: $filmstripID, anchor: .center)
+        .scrollTargetBehavior(.viewAligned)
+        .onScrollPhaseChange { _, newPhase in
+            let scrubbing = newPhase == .interacting || newPhase == .decelerating
+            guard scrubbing != isScrubbing else { return }
+            isScrubbing = scrubbing
+            if !scrubbing {
+                // 停下后对正当前张（展开后宽度变了）
+                withAnimation(.easeOut(duration: 0.2)) { filmstripID = currentPhoto.id }
+            }
+        }
+        .onChange(of: filmstripID) { _, id in
+            // 只响应用户拖动：程序滚动（翻页联动）不反向改页码
+            guard isScrubbing, let id, id != currentPhoto.id,
+                  let target = session.photos.firstIndex(where: { $0.id == id }) else { return }
+            index = target
+        }
+        .onChange(of: index) {
+            guard !isScrubbing, filmstripID != currentPhoto.id else { return }
+            withAnimation(.easeOut(duration: 0.25)) { filmstripID = currentPhoto.id }
+        }
+        .onAppear { filmstripID = currentPhoto.id }
+        #if DEBUG
+        // 调试：FILMSTRIP_JUMP=n 打开 1.5s 后模拟点按胶片条第 n 张（验证翻页器与胶片条联动）
+        .task {
+            guard let raw = ProcessInfo.processInfo.environment["FILMSTRIP_JUMP"], let target = Int(raw),
+                  session.photos.indices.contains(target) else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            jumpFromFilmstrip(to: session.photos[target].id)
+        }
+        #endif
+        .frame(height: Self.filmstripHeight)
+        .padding(.bottom, stableSafeBottom)
+        .background {
+            // 底色规则同顶部 bar
+            ZStack {
+                Color(.systemBackground)
+                Color.black.opacity(barOverImage ? 0 : immersiveAmount)
+            }
+        }
+    }
+
+    private func jumpFromFilmstrip(to photoID: UUID) {
+        guard let target = session.photos.firstIndex(where: { $0.id == photoID }) else { return }
+        index = target
     }
 
     /// slide=true：位移隐藏（单击侵入时）；slide=false：纯淡出。
@@ -374,6 +479,7 @@ struct PhotoViewerOverlay: View {
     private func beginOpen() {
         // 打开时状态栏可见，捕获稳定的状态栏高度供 bar 布局使用
         stableSafeTop = liveStatusBarHeight
+        stableSafeBottom = liveBottomInset
         let photo = currentPhoto
         let image = loadTransitionImage(for: photo)
         transitionImage = image
@@ -577,5 +683,42 @@ struct PhotoViewerOverlay: View {
             y: (container.height - size.height) / 2,
             width: size.width,
             height: size.height)
+    }
+}
+
+/// 胶片条里的一格：平时为窄条，当前张展开为原始宽高比（限宽）
+private struct FilmstripThumbnail: View {
+    let photo: Photo
+    let itemSize: CGSize
+    let expanded: Bool
+
+    @State private var image: UIImage?
+
+    private var width: CGFloat {
+        guard expanded else { return itemSize.width }
+        let aspect = photo.height > 0 ? CGFloat(photo.width) / CGFloat(photo.height) : 1
+        return min(max(itemSize.height * aspect, itemSize.width), itemSize.height * 1.8)
+    }
+
+    var body: some View {
+        Color(.secondarySystemFill)
+            .overlay {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .frame(width: width, height: itemSize.height)
+            .clipped()
+            .padding(.horizontal, expanded ? 4 : 0)
+            .task(id: photo.id) {
+                if let cached = ThumbnailCache.shared.cachedImage(for: photo.id, kind: .tiny)
+                    ?? ThumbnailCache.shared.cachedImage(for: photo.id, kind: .small) {
+                    image = cached
+                    return
+                }
+                image = await ThumbnailCache.shared.image(for: photo.id, kind: .tiny)
+            }
     }
 }

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import ImageIO
+import PDFKit
 import UIKit
 import UniformTypeIdentifiers
 
@@ -55,6 +56,8 @@ struct StoredImage: Sendable {
     let relativePath: String
     let width: Int
     let height: Int
+    /// PDF 的页数；图片为 nil
+    var pageCount: Int?
 }
 
 enum ImageStoreError: Error {
@@ -120,6 +123,9 @@ final class ImageStore: Sendable {
     }
 
     func store(data: Data, photoID: UUID) throws -> StoredImage {
+        if Self.isPDF(data) {
+            return try storePDF(data: data, photoID: photoID)
+        }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(source) > 0
         else {
@@ -145,6 +151,59 @@ final class ImageStore: Sendable {
         }
 
         return StoredImage(relativePath: relativePath, width: width, height: height)
+    }
+
+    /// PDF（DESIGN.md §8.3）：原文件落盘，缩略图由首页渲染（白底），之后与图片走同一套缩略图管线
+    private func storePDF(data: Data, photoID: UUID) throws -> StoredImage {
+        guard let document = PDFDocument(data: data), document.pageCount > 0,
+              let source = Self.firstPageImageSource(of: document)
+        else {
+            throw ImageStoreError.unreadableImage
+        }
+        let bucket = String(photoID.uuidString.prefix(2)).lowercased()
+        let relativePath = "originals/\(bucket)/\(photoID.uuidString).pdf"
+        let destination = url(forRelativePath: relativePath)
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: destination, options: .atomic)
+
+        let (width, height) = Self.pixelSize(of: source)
+        do {
+            for kind in ThumbnailKind.allCases {
+                try writeThumbnail(from: source, photoID: photoID, kind: kind, width: width, height: height)
+            }
+        } catch {
+            deleteFiles(relativePath: relativePath, photoID: photoID)
+            throw error
+        }
+        return StoredImage(relativePath: relativePath, width: width, height: height, pageCount: document.pageCount)
+    }
+
+    static func isPDF(_ data: Data) -> Bool {
+        data.prefix(5).elementsEqual("%PDF-".utf8)
+    }
+
+    /// PDF 首页按长边 2048px 渲染成位图（白底），包成 CGImageSource 供缩略图管线使用
+    private static func firstPageImageSource(of document: PDFDocument) -> CGImageSource? {
+        guard let page = document.page(at: 0) else { return nil }
+        let bounds = page.bounds(for: .mediaBox)
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        let scale = 2048 / max(bounds.width, bounds.height)
+        let size = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            let cgContext = context.cgContext
+            // PDF 坐标系原点在左下：翻转后按比例绘制
+            cgContext.translateBy(x: 0, y: size.height)
+            cgContext.scaleBy(x: scale, y: -scale)
+            page.draw(with: .mediaBox, to: cgContext)
+        }
+        guard let png = image.pngData() else { return nil }
+        return CGImageSourceCreateWithData(png as CFData, nil)
     }
 
     private func writeThumbnail(
@@ -266,10 +325,15 @@ final class ImageStore: Sendable {
         let bucket = originalsURL.appendingPathComponent(
             String(photoID.uuidString.prefix(2)).lowercased(), isDirectory: true)
         guard let filename = (try? FileManager.default.contentsOfDirectory(atPath: bucket.path))?
-                .first(where: { $0.hasPrefix(photoID.uuidString) }),
-              let source = CGImageSourceCreateWithURL(bucket.appendingPathComponent(filename) as CFURL, nil),
-              CGImageSourceGetCount(source) > 0
+                .first(where: { $0.hasPrefix(photoID.uuidString) })
         else {
+            return
+        }
+        let fileURL = bucket.appendingPathComponent(filename)
+        let imageSource: CGImageSource? = fileURL.pathExtension.lowercased() == "pdf"
+            ? PDFDocument(url: fileURL).flatMap(Self.firstPageImageSource(of:))
+            : CGImageSourceCreateWithURL(fileURL as CFURL, nil)
+        guard let source = imageSource, CGImageSourceGetCount(source) > 0 else {
             return
         }
         let (width, height) = Self.pixelSize(of: source)

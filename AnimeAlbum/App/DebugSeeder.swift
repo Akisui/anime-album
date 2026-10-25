@@ -40,6 +40,25 @@ enum DebugSeeder {
             }
         }
 
+        // SEED_PDF=1 再追加一份 3 页的示例 PDF（走与导入相同的 PDF 落盘 + 首页缩略图）
+        if ProcessInfo.processInfo.environment["SEED_PDF"] == "1",
+           ((try? context.fetch(FetchDescriptor<Photo>())) ?? []).allSatisfy({ !$0.isPDF }) {
+            let data = renderSamplePDF(pages: 3)
+            let photoID = UUID()
+            if let stored = try? ImageStore.shared.store(data: data, photoID: photoID) {
+                let photo = Photo()
+                photo.id = photoID
+                photo.contentHash = ImageStore.contentHash(of: data)
+                photo.fileRelativePath = stored.relativePath
+                photo.width = stored.width
+                photo.height = stored.height
+                photo.originalFilename = "示例文档.pdf"
+                photo.mediaType = Photo.MediaType.pdf.rawValue
+                photo.pageCount = stored.pageCount ?? 1
+                context.insert(photo)
+            }
+        }
+
         if (try? context.fetchCount(FetchDescriptor<Album>())) ?? 0 == 0 {
             let photos = (try? context.fetch(FetchDescriptor<Photo>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
             let album = AlbumOperations.createAlbum(named: "示例角色", in: context)
@@ -47,6 +66,25 @@ enum DebugSeeder {
         }
 
         try? context.save()
+    }
+
+    private static func renderSamplePDF(pages: Int) -> Data {
+        let bounds = CGRect(x: 0, y: 0, width: 595, height: 842)
+        return UIGraphicsPDFRenderer(bounds: bounds).pdfData { context in
+            for page in 1...pages {
+                context.beginPage()
+                UIColor(hue: CGFloat(page) / CGFloat(pages + 1), saturation: 0.35, brightness: 0.95, alpha: 1).setFill()
+                context.fill(CGRect(x: 40, y: 40, width: bounds.width - 80, height: 220))
+                let title = "示例文档 第 \(page) 页" as NSString
+                title.draw(at: CGPoint(x: 60, y: 300), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 36, weight: .bold), .foregroundColor: UIColor.black,
+                ])
+                let body = String(repeating: "角色设定资料 · ", count: 40) as NSString
+                body.draw(in: CGRect(x: 60, y: 370, width: bounds.width - 120, height: 400), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 16), .foregroundColor: UIColor.darkGray,
+                ])
+            }
+        }
     }
 
     private static func renderSampleImage(index: Int, of count: Int) -> Data {

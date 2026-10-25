@@ -57,7 +57,7 @@ final class SelectionBarPresenter {
     }
 }
 
-/// 选择模式底部栏（覆盖在 Tab 栏之上）：左删除 / 中计数 / 右加入相簿（仅选照片时）。
+/// 选择模式底部栏（覆盖在 Tab 栏之上）：左分享（仅选照片时）/ 中计数 / 右加入相簿（仅选照片时）+ 删除。
 /// 高度与 Tab 栏图标区一致（49pt），背景延伸进 Home 指示条区域；
 /// 底层铺不透明系统背景色盖住下面的 Tab 图标（材质是半透明的）。
 struct SelectionBarOverlay: View {
@@ -74,15 +74,18 @@ struct SelectionBarOverlay: View {
         ZStack {
             SelectionCountLabel(count: session.count, unit: unit)
                 .font(.subheadline.weight(.semibold))
-            HStack {
-                Button {
-                    session.onDelete()
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+            HStack(spacing: 4) {
+                if case .photos = session.kind {
+                    Button {
+                        PhotoSharing.share(session.photos)
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("分享")
+                    .disabled(session.count == 0)
                 }
-                .disabled(session.count == 0)
                 Spacer()
                 if case .photos(let excludedAlbumID) = session.kind {
                     Menu {
@@ -96,8 +99,18 @@ struct SelectionBarOverlay: View {
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
+                    .accessibilityLabel("添加到相簿")
                     .disabled(session.count == 0)
                 }
+                Button {
+                    session.onDelete()
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("删除")
+                .disabled(session.count == 0)
             }
             .padding(.horizontal, 8)
         }

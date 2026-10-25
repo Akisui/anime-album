@@ -111,6 +111,7 @@ struct AlbumsView: View {
                         AlbumCard(album: album, isSelected: isSelecting && selectedIDs.contains(album.id))
                     }
                     .buttonStyle(PressableCardStyle())
+                    .hoverEffect(.highlight)
                     // 长按预览只抬起封面（与原生一致），不连带下方文字
                     .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: AlbumCoverView.cornerRadius, style: .continuous))
                     .contextMenu {

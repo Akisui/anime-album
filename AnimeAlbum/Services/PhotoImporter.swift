@@ -42,6 +42,37 @@ final class PhotoImporter {
         }
     }
 
+    /// 拖入导入（iPad 分屏 / 台前调度从其他 App 拖进来，DESIGN.md §5.1 入口 2）
+    @discardableResult
+    func importItemProviders(_ providers: [NSItemProvider], context: ModelContext) async -> ImportResult {
+        await runImport(count: providers.count, context: context) { index in
+            let provider = providers[index]
+            guard let type = provider.registeredContentTypes.first(where: { Self.isImportable($0) }) else {
+                return nil
+            }
+            return (try await Self.loadData(from: provider, type: type), provider.suggestedName)
+        }
+    }
+
+    /// 可导入的内容类型（拖入、文件导入共用）
+    static let importableTypes: [UTType] = [.image, .pdf]
+
+    private static func isImportable(_ type: UTType) -> Bool {
+        importableTypes.contains { type.conforms(to: $0) }
+    }
+
+    private static func loadData(from provider: NSItemProvider, type: UTType) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = provider.loadDataRepresentation(for: type) { data, error in
+                if let data {
+                    continuation.resume(returning: data)
+                } else {
+                    continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown))
+                }
+            }
+        }
+    }
+
     private func runImport(
         count: Int,
         context: ModelContext,
@@ -87,6 +118,10 @@ final class PhotoImporter {
                 photo.width = stored.width
                 photo.height = stored.height
                 photo.originalFilename = filename
+                if let pageCount = stored.pageCount {
+                    photo.mediaType = Photo.MediaType.pdf.rawValue
+                    photo.pageCount = pageCount
+                }
                 context.insert(photo)
                 photosByHash[hash] = photo
                 appendResult(photo)

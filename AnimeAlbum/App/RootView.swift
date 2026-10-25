@@ -1,13 +1,19 @@
 import SwiftData
 import SwiftUI
 
-enum RootTab: String, Hashable {
+enum RootTab: Hashable {
     case library
     case albums
+    /// iPad 侧栏里的单个相簿（DESIGN.md §6.6：侧栏列出图库 / 各相簿）
+    case album(UUID)
 }
 
 struct RootView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(AppCommandCenter.self) private var commandCenter
+    @Query(sort: \Album.sortIndex) private var albums: [Album]
+    @State private var newAlbumName = ""
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var viewerPresenter = ViewerPresenter()
     @State private var selectionBarPresenter = SelectionBarPresenter()
     @State private var selectedTab: RootTab = {
@@ -28,6 +34,21 @@ struct RootView: View {
             Tab("相簿", systemImage: "rectangle.stack", value: RootTab.albums) {
                 AlbumsView()
             }
+            // 各相簿只出现在 iPad 侧栏。紧凑宽度（iPhone）下整组不加：.tabPlacement(.sidebarOnly) /
+            // .defaultVisibility(.hidden, for: .tabBar) 在 iPhone 底部 Tab 栏上都不生效，相簿会变成一个个 Tab（实测）
+            if horizontalSizeClass == .regular {
+                TabSection("我的相簿") {
+                    ForEach(albums) { album in
+                        Tab(album.name, systemImage: "rectangle.stack", value: RootTab.album(album.id)) {
+                            NavigationStack {
+                                AlbumDetailView(album: album)
+                            }
+                        }
+                        .tabPlacement(.sidebarOnly)
+                    }
+                }
+                .defaultVisibility(.hidden, for: .tabBar)
+            }
         }
         // iPad 上自动转为侧栏（与原生相册的双形态一致）
         .tabViewStyle(.sidebarAdaptable)
@@ -44,6 +65,31 @@ struct RootView: View {
                 PhotoViewerOverlay(session: session)
             }
         }
+        // ⌘N：命名框由这里弹（相簿页可能还没创建），存储后切到相簿页
+        .alert("新建相簿", isPresented: newAlbumAlertPresented) {
+            TextField("相簿名称", text: $newAlbumName)
+            Button("取消", role: .cancel) {}
+            Button("存储") {
+                let trimmed = newAlbumName.trimmingCharacters(in: .whitespacesAndNewlines)
+                AlbumOperations.createAlbum(named: trimmed.isEmpty ? "未命名相簿" : trimmed, in: modelContext)
+                try? modelContext.save()
+                selectedTab = .albums
+            }
+        } message: {
+            Text("为此相簿输入一个名称。")
+        }
+        // 分屏变窄后侧栏相簿不复存在：退回相簿页
+        .onChange(of: horizontalSizeClass) { _, sizeClass in
+            if sizeClass != .regular, case .album = selectedTab {
+                selectedTab = .albums
+            }
+        }
+        // 侧栏里选中的相簿被删除：退回相簿页
+        .onChange(of: albums.map(\.id)) { _, ids in
+            if case .album(let id) = selectedTab, !ids.contains(id) {
+                selectedTab = .albums
+            }
+        }
         .statusBarHidden(viewerPresenter.session != nil && viewerPresenter.chromeHidden)
         .environment(viewerPresenter)
         .environment(selectionBarPresenter)
@@ -51,7 +97,27 @@ struct RootView: View {
             #if DEBUG
             DebugSeeder.applyLaunchTweaks()
             await DebugSeeder.seedIfRequested(context: modelContext)
+            let env = ProcessInfo.processInfo.environment
+            // SIDEBAR_ALBUM=1：直接选中侧栏第一个相簿（iPad）；AUTO_NEW_ALBUM=1：1.5s 后模拟按下 ⌘N
+            if env["SIDEBAR_ALBUM"] == "1", let first = albums.first {
+                selectedTab = .album(first.id)
+            }
+            if env["AUTO_NEW_ALBUM"] == "1" {
+                try? await Task.sleep(for: .seconds(1.5))
+                commandCenter.newAlbumRequested = true
+            }
             #endif
         }
+    }
+
+    private var newAlbumAlertPresented: Binding<Bool> {
+        Binding(
+            get: { commandCenter.newAlbumRequested },
+            set: { presented in
+                if presented {
+                    newAlbumName = ""
+                }
+                commandCenter.newAlbumRequested = presented
+            })
     }
 }

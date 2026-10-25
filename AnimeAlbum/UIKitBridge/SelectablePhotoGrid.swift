@@ -84,6 +84,7 @@ struct SelectablePhotoGrid: UIViewRepresentable {
             let cellRegistration = UICollectionView.CellRegistration<PhotoCollectionCell, UUID> {
                 [weak self] cell, _, photoID in
                 cell.configure(photoID: photoID)
+                cell.setDocumentPageCount(self?.documentPageCounts[photoID])
                 cell.setChecked(self?.parent.selectedIDs.contains(photoID) ?? false, animated: false)
             }
             dataSource = UICollectionViewDiffableDataSource<Int, UUID>(collectionView: collectionView) {
@@ -93,7 +94,11 @@ struct SelectablePhotoGrid: UIViewRepresentable {
             }
         }
 
+        private var documentPageCounts: [UUID: Int] = [:]
+
         func update(photos: [Photo]) {
+            documentPageCounts = Dictionary(
+                photos.lazy.filter(\.isPDF).map { ($0.id, $0.pageCount) }, uniquingKeysWith: { first, _ in first })
             let ids = photos.map(\.id)
             guard ids != dataSource.snapshot().itemIdentifiers else { return }
 

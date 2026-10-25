@@ -13,6 +13,8 @@ struct LibraryView: View {
     @State private var showingPhotosPicker = false
     @State private var showingFileImporter = false
     @State private var frameBox = GridFrameBox()
+    /// 正在阅读的 PDF（PDF 不进照片查看器，单独全屏分页阅读）
+    @State private var openPDF: Photo?
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -28,6 +30,11 @@ struct LibraryView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { toolbarContent }
                 .overlay(alignment: .bottom) { ImportStatusOverlay(importer: importer) }
+                // 从其他 App 拖图片进来（iPad 分屏 / 台前调度）
+                .onDrop(of: PhotoImporter.importableTypes, isTargeted: nil) { providers in
+                    Task { await importer.importItemProviders(providers, context: modelContext) }
+                    return true
+                }
                 .onChange(of: selectedIDs) {
                     selectionBarPresenter.update(photos: selectedPhotos)
                 }
@@ -51,6 +58,11 @@ struct LibraryView: View {
                 try? await Task.sleep(for: .seconds(1))
                 toggleSelectionMode()
             }
+            // OPEN_PDF=1 打开图库里第一个 PDF（配合 SEED_PDF=1）
+            if env["OPEN_PDF"] == "1", let index = photos.firstIndex(where: \.isPDF) {
+                try? await Task.sleep(for: .seconds(0.5))
+                openViewer(at: index)
+            }
             if let raw = env["OPEN_INDEX"], let target = Int(raw), photos.indices.contains(target) {
                 try? await Task.sleep(for: .seconds(0.5))
                 openViewer(at: target)
@@ -60,10 +72,11 @@ struct LibraryView: View {
             }
             #endif
         }
+        .fullScreenCover(item: $openPDF) { PDFReaderView(photo: $0) }
         .photosPicker(isPresented: $showingPhotosPicker, selection: $pickerItems, matching: .images)
         .fileImporter(
             isPresented: $showingFileImporter,
-            allowedContentTypes: [.image],
+            allowedContentTypes: PhotoImporter.importableTypes,
             allowsMultipleSelection: true
         ) { result in
             if case .success(let urls) = result {
@@ -148,6 +161,9 @@ struct LibraryView: View {
             promptNewAlbum(with: [photo])
         }
         return [
+            GridMenuItem(title: "分享", systemImage: "square.and.arrow.up") {
+                PhotoSharing.share([photo])
+            },
             GridMenuItem(title: "添加到相簿", systemImage: "rectangle.stack.badge.plus",
                          children: albumItems + [newAlbum]),
             GridMenuItem(title: "删除", systemImage: "trash", isDestructive: true) {
@@ -212,9 +228,17 @@ struct LibraryView: View {
 
     private func openViewer(at index: Int) {
         guard photos.indices.contains(index) else { return }
+        let photo = photos[index]
+        if photo.isPDF {
+            openPDF = photo
+            return
+        }
+        // 查看器只翻图片（PDF 在查看器里没有分页能力，点开走阅读器）
+        let images = photos.filter { !$0.isPDF }
+        guard let imageIndex = images.firstIndex(where: { $0.id == photo.id }) else { return }
         let box = frameBox
         viewerPresenter.present(
-            photos: photos, index: index,
+            photos: images, index: imageIndex,
             sourceFrame: { box.lookup?($0) },
             sourceVisibleRect: { box.visibleRect?() })
     }

@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct AnimeAlbumApp: App {
     let container: ModelContainer
+    @State private var commandCenter = AppCommandCenter()
 
     init() {
         do {
@@ -16,7 +17,9 @@ struct AnimeAlbumApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                .environment(commandCenter)
         }
         .modelContainer(container)
+        .commands { AppCommands(center: commandCenter) }
     }
 }

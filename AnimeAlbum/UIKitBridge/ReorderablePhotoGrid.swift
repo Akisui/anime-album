@@ -38,6 +38,8 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
         collectionView.backgroundColor = .systemBackground
         collectionView.alwaysBounceVertical = true
         collectionView.delegate = coordinator
+        // iPad 外接键盘：方向键在网格中移动焦点，回车 / 空格打开（走 didSelectItemAt，与点按同一路径）
+        collectionView.allowsFocus = true
         // 长按：按下即逐渐浮起，0.3s 震动时已完全拿起、立即可拖（系统交互式移动），继续按住不动才弹出菜单。
         // 不用系统拖放与系统菜单：系统菜单的内部手势会压住这个长按（真机日志实测）；与系统拖放联动时
         // 又要「浮起后再等一下」才能拖 —— 都达不到「一震动就能拖」
@@ -249,6 +251,7 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
             let cellRegistration = UICollectionView.CellRegistration<PhotoCollectionCell, UUID> {
                 [weak self] cell, _, photoID in
                 cell.configure(photoID: photoID, kind: self?.thumbnailKind ?? .small)
+                cell.setDocumentPageCount(self?.documentPageCounts[photoID])
                 cell.setChecked(self?.isChecked(photoID) ?? false, animated: false)
                 cell.isHidden = photoID == self?.hiddenPhotoID
             }
@@ -268,15 +271,19 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
             let footerRegistration = UICollectionView.SupplementaryRegistration<GridFooterView>(
                 elementKind: UICollectionView.elementKindSectionFooter
             ) { [weak self] footer, _, _ in
-                let count = self?.dataSource.snapshot().numberOfItems ?? 0
-                footer.label.text = "\(count) 张照片"
+                footer.label.text = self?.footerText
             }
             dataSource.supplementaryViewProvider = { collectionView, kind, indexPath in
                 collectionView.dequeueConfiguredReusableSupplementary(using: footerRegistration, for: indexPath)
             }
         }
 
+        /// PDF 的页数（格子左下角标记用）
+        private var documentPageCounts: [UUID: Int] = [:]
+
         func update(photos: [Photo]) {
+            documentPageCounts = Dictionary(
+                photos.lazy.filter(\.isPDF).map { ($0.id, $0.pageCount) }, uniquingKeysWith: { first, _ in first })
             aspectRatios = photos.map { $0.height > 0 ? CGFloat($0.width) / CGFloat($0.height) : 1 }
             if let aspectLayout = collectionView?.collectionViewLayout as? PhotoAspectListLayout,
                aspectLayout.aspectRatios != aspectRatios {
@@ -295,6 +302,22 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
                 if sticksToBottom {
                     anchored?.scrollToBottom(animated: true)
                 }
+            }
+            // 页脚只在创建时配置一次，数量变了要手动刷新（否则导入 / 删除后计数不变）
+            for footer in collectionView?.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionFooter) ?? [] {
+                (footer as? GridFooterView)?.label.text = footerText
+            }
+        }
+
+        /// 「N 张照片、M 个 PDF」
+        private var footerText: String {
+            let total = dataSource.snapshot().numberOfItems
+            let documents = documentPageCounts.count
+            let images = total - documents
+            switch (images, documents) {
+            case (_, 0): return "\(images) 张照片"
+            case (0, _): return "\(documents) 个 PDF"
+            default: return "\(images) 张照片、\(documents) 个 PDF"
             }
         }
 
