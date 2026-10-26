@@ -110,7 +110,7 @@ struct PhotoViewerOverlay: View {
     /// 底部安全区（Home 指示条）高度：胶片条在其上方，同样在打开时捕获一次
     @State private var stableSafeBottom: CGFloat = 0
     /// 胶片条居中的照片（与翻页器双向同步：翻页 → 胶片条滚到当前张；拖动胶片条 → 翻页器跟着换图）
-    @State private var filmstripID: UUID?
+    @State private var filmstripPosition = ScrollPosition(idType: UUID.self)
     /// 用户正在拖动 / 惯性滚动胶片条：此时当前张不展开（宽度变化会让滚动位置跳）
     @State private var isScrubbing = false
     @State private var openAnimationDone = false
@@ -408,31 +408,35 @@ struct PhotoViewerOverlay: View {
             .scrollTargetLayout()
             .animation(.easeOut(duration: 0.2), value: expandedFilmstripID)
         }
-        // 首尾两张也能滚到正中
-        .contentMargins(.horizontal, max(containerSize.width / 2 - Self.filmstripItemSize.width / 2, 0),
-                        for: .scrollContent)
-        .scrollPosition(id: $filmstripID, anchor: .center)
-        .scrollTargetBehavior(.viewAligned)
+        // 首尾两张也能滚到正中。不用 .viewAligned：它按格子左边缘对齐，展开的当前张会偏右；
+        // 停下后由 onScrollPhaseChange 把当前张滚回正中
+        .contentMargins(.horizontal, containerSize.width / 2, for: .scrollContent)
+        .scrollPosition($filmstripPosition, anchor: .center)
         .onScrollPhaseChange { _, newPhase in
             let scrubbing = newPhase == .interacting || newPhase == .decelerating
             guard scrubbing != isScrubbing else { return }
             isScrubbing = scrubbing
             if !scrubbing {
                 // 停下后对正当前张（展开后宽度变了）
-                withAnimation(.easeOut(duration: 0.2)) { filmstripID = currentPhoto.id }
+                centerFilmstrip(animated: true)
             }
         }
-        .onChange(of: filmstripID) { _, id in
+        .onChange(of: filmstripPosition.viewID(type: UUID.self)) { _, id in
             // 只响应用户拖动：程序滚动（翻页联动）不反向改页码
             guard isScrubbing, let id, id != currentPhoto.id,
                   let target = session.photos.firstIndex(where: { $0.id == id }) else { return }
             index = target
         }
         .onChange(of: index) {
-            guard !isScrubbing, filmstripID != currentPhoto.id else { return }
-            withAnimation(.easeOut(duration: 0.25)) { filmstripID = currentPhoto.id }
+            guard !isScrubbing else { return }
+            centerFilmstrip(animated: true)
         }
-        .onAppear { filmstripID = currentPhoto.id }
+        .task {
+            // LazyHStack 首次定位按估算尺寸算偏移（实测展开的当前张偏右 ~5pt）：布局完成后再对正一次
+            centerFilmstrip(animated: false)
+            try? await Task.sleep(for: .milliseconds(50))
+            centerFilmstrip(animated: false)
+        }
         #if DEBUG
         // 调试：FILMSTRIP_JUMP=n 打开 1.5s 后模拟点按胶片条第 n 张（验证翻页器与胶片条联动）
         .task {
@@ -450,6 +454,15 @@ struct PhotoViewerOverlay: View {
                 Color(.systemBackground)
                 Color.black.opacity(barOverImage ? 0 : immersiveAmount)
             }
+        }
+    }
+
+    private func centerFilmstrip(animated: Bool) {
+        let id = currentPhoto.id
+        if animated {
+            withAnimation(.easeOut(duration: 0.25)) { filmstripPosition.scrollTo(id: id, anchor: .center) }
+        } else {
+            filmstripPosition.scrollTo(id: id, anchor: .center)
         }
     }
 
