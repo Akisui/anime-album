@@ -40,7 +40,7 @@ enum DebugSeeder {
             }
         }
 
-        // SEED_PDF=1 再追加一份 3 页的示例 PDF（走与导入相同的 PDF 落盘 + 首页缩略图）
+        // SEED_PDF=1 再追加一份 4 页的示例 PDF（前 3 页矢量、第 4 页整页一张图 = 扫描页；走与导入相同的落盘 + 拆页）
         if ProcessInfo.processInfo.environment["SEED_PDF"] == "1",
            ((try? context.fetch(FetchDescriptor<Photo>())) ?? []).allSatisfy({ !$0.isPDF }) {
             let data = renderSamplePDF(pages: 3)
@@ -84,11 +84,15 @@ enum DebugSeeder {
                     .font: UIFont.systemFont(ofSize: 16), .foregroundColor: UIColor.darkGray,
                 ])
             }
+            // 扫描页：整页只有一张 JPEG
+            context.beginPage()
+            if let scan = UIImage(data: renderSampleImage(index: 7, of: 18, size: CGSize(width: 1190, height: 1684))) {
+                scan.draw(in: bounds)
+            }
         }
     }
 
-    private static func renderSampleImage(index: Int, of count: Int) -> Data {
-        let size = CGSize(width: 600, height: 600)
+    private static func renderSampleImage(index: Int, of count: Int, size: CGSize = CGSize(width: 600, height: 600)) -> Data {
         let renderer = UIGraphicsImageRenderer(size: size)
         let image = renderer.image { renderContext in
             UIColor(hue: CGFloat(index) / CGFloat(count), saturation: 0.55, brightness: 0.9, alpha: 1).setFill()

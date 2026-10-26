@@ -1,3 +1,4 @@
+import SwiftData
 import SwiftUI
 
 // MARK: - 呈现状态
@@ -6,7 +7,8 @@ import SwiftUI
 @Observable
 final class ViewerPresenter {
     struct Session {
-        let photos: [Photo]
+        /// 一页一项（PDF 按页展开，见 ViewerItem）
+        let items: [ViewerItem]
         let initialIndex: Int
         /// 按照片 ID 查询其网格单元当前的全局 frame（打开起点 / 关闭落点）；不可见返回 nil
         let sourceFrame: (UUID) -> CGRect?
@@ -22,16 +24,21 @@ final class ViewerPresenter {
     /// 关闭动画完全结束（end()）时才恢复显示
     private(set) var hiddenPhotoID: UUID?
 
+    /// photos 里的 PDF 按页展开；index 指 photos 里点开的那张，page 为 PDF 打开到的页
     func present(
-        photos: [Photo], index: Int,
+        photos: [Photo], index: Int, page: Int = 0,
         sourceFrame: @escaping (UUID) -> CGRect?,
         sourceVisibleRect: @escaping () -> CGRect? = { nil }
     ) {
         guard session == nil, photos.indices.contains(index) else { return }
+        let photoID = photos[index].id
+        let items = ViewerItem.items(for: photos)
+        guard let first = items.firstIndex(where: { $0.photoID == photoID }) else { return }
+        let pages = items[first...].prefix { $0.photoID == photoID }.count
         chromeHidden = false
-        hiddenPhotoID = photos[index].id
+        hiddenPhotoID = photoID
         session = Session(
-            photos: photos, initialIndex: index,
+            items: items, initialIndex: first + max(0, min(page, pages - 1)),
             sourceFrame: sourceFrame, sourceVisibleRect: sourceVisibleRect)
     }
 
@@ -72,6 +79,8 @@ struct PhotoViewerOverlay: View {
     let session: ViewerPresenter.Session
 
     @Environment(ViewerPresenter.self) private var presenter
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \Album.sortIndex) private var albums: [Album]
 
     private enum Phase {
         case opening
@@ -81,6 +90,8 @@ struct PhotoViewerOverlay: View {
     }
 
     @State private var phase: Phase = .opening
+    /// 查看中的各页（打开时取自 session；查看器里删除 / 编辑后在这里更新）
+    @State private var items: [ViewerItem]
     @State private var index: Int
     @State private var containerSize: CGSize = .zero
     @State private var backdropOpacity: Double = 0
@@ -92,7 +103,7 @@ struct PhotoViewerOverlay: View {
     /// 从 bar 底下滑出/缩回（原生同款），而不是瞬间穿透显示到 bar 之上
     @State private var maskRect: CGRect = .zero
     @State private var dragFitRect: CGRect = .zero
-    @State private var draggingPhotoID: UUID?
+    @State private var draggingItemID: String?
     /// 拖拽开始到关闭结束期间压住查看器 bar：避免松手瞬间 bar 跟随 backdropOpacity
     /// 突然闪现在缩略图页的 bar 上（两者高度还不一致）
     @State private var chromeSuppressed = false
@@ -110,18 +121,23 @@ struct PhotoViewerOverlay: View {
     /// 底部安全区（Home 指示条）高度：胶片条在其上方，同样在打开时捕获一次
     @State private var stableSafeBottom: CGFloat = 0
     /// 胶片条居中的照片（与翻页器双向同步：翻页 → 胶片条滚到当前张；拖动胶片条 → 翻页器跟着换图）
-    @State private var filmstripPosition = ScrollPosition(idType: UUID.self)
+    @State private var filmstripPosition = ScrollPosition(idType: String.self)
     /// 用户正在拖动 / 惯性滚动胶片条：此时当前张不展开（宽度变化会让滚动位置跳）
     @State private var isScrubbing = false
     @State private var openAnimationDone = false
-    @State private var readyPages: Set<UUID> = []
-    @State private var zoomedPages: Set<UUID> = []
+    @State private var readyPages: Set<String> = []
+    @State private var zoomedPages: Set<String> = []
     /// 每页当前显示的图片顶边（窗口坐标 Y），由 ZoomableImageView 实时上报（含缩放/平移）
-    @State private var imageTops: [UUID: CGFloat] = [:]
+    @State private var imageTops: [String: CGFloat] = [:]
+    /// 「…」菜单：待确认删除的照片、正在裁剪的照片、新建相簿
+    @State private var pendingDeletion: ViewerItem?
+    @State private var editingItem: ViewerItem?
+    @State private var showingNewAlbumAlert = false
+    @State private var newAlbumName = ""
 
     /// 每页缩放状态由页面的代理回调维护（含离屏自动复位），跨页切换不丢失
     private var currentPageZoomed: Bool {
-        zoomedPages.contains(currentPhoto.id)
+        zoomedPages.contains(currentItem.id)
     }
 
     /// bar 高度对齐系统 inline 导航栏（44pt），使查看器 bar 底边与缩略图页 bar 底边一致
@@ -162,11 +178,11 @@ struct PhotoViewerOverlay: View {
         if ProcessInfo.processInfo.environment["FORCE_INTRUDE"] == "1" { return true }
         #endif
         // 优先用实时上报的图片顶边（含缩放/平移）；未上报时退回 fit 矩形估算
-        if let top = imageTops[currentPhoto.id] {
+        if let top = imageTops[currentItem.id] {
             return top < barBottomY - 1
         }
-        let image = loadTransitionImage(for: currentPhoto)
-        let fit = fitRect(for: imageSize(of: currentPhoto, image: image), in: containerSize)
+        let image = loadTransitionImage(for: currentItem)
+        let fit = fitRect(for: imageSize(of: currentItem, image: image), in: containerSize)
         return fit.minY < barBottomY - 1
     }
 
@@ -182,6 +198,7 @@ struct PhotoViewerOverlay: View {
 
     init(session: ViewerPresenter.Session) {
         self.session = session
+        _items = State(initialValue: session.items)
         _index = State(initialValue: session.initialIndex)
     }
 
@@ -252,6 +269,32 @@ struct PhotoViewerOverlay: View {
             }
             .ignoresSafeArea()
         }
+        .confirmationDialog(
+            pendingDeletion?.page != nil ? "删除这个 PDF？" : "删除这张照片？",
+            isPresented: Binding(get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) {
+                if let item = pendingDeletion {
+                    delete(item)
+                }
+                pendingDeletion = nil
+            }
+        } message: {
+            Text("将从图库和所有相簿中删除。此操作不可撤销。")
+        }
+        .alert("新建相簿", isPresented: $showingNewAlbumAlert) {
+            TextField("相簿名称", text: $newAlbumName)
+            Button("取消", role: .cancel) {}
+            Button("存储") { addCurrentToNewAlbum() }
+        } message: {
+            Text("为此相簿输入一个名称。")
+        }
+        .fullScreenCover(item: $editingItem) { item in
+            PhotoCropView(photoID: item.photoID) {
+                reloadItems(of: item.photoID)
+            }
+        }
         #if DEBUG
         // 调试：AUTO_IMMERSIVE=1 触发放大式（纯淡出）；AUTO_SLIDE=1 触发单击滑动式隐藏。便于逐帧截图
         .onChange(of: phase) {
@@ -266,6 +309,16 @@ struct PhotoViewerOverlay: View {
                 Task {
                     try? await Task.sleep(for: .seconds(0.6))
                     setChrome(hidden: true, slide: true)
+                }
+            } else if let action = env["VIEWER_ACTION"] {
+                // VIEWER_ACTION=crop 打开裁剪编辑器；delete 直接删除当前张（跳过确认框），验证删除后的翻页 / 关闭
+                Task {
+                    try? await Task.sleep(for: .seconds(1))
+                    if action == "crop" {
+                        editingItem = currentItem
+                    } else if action == "delete" {
+                        delete(currentItem)
+                    }
                 }
             } else if env["AUTO_TAP"] == "1" {
                 // 走真实单击逻辑（按 imageIntrudesBar 决定滑动/淡出），验证侵入判断
@@ -300,9 +353,9 @@ struct PhotoViewerOverlay: View {
 
     private var pager: some View {
         TabView(selection: $index) {
-            ForEach(Array(session.photos.enumerated()), id: \.element.id) { offset, photo in
+            ForEach(Array(items.enumerated()), id: \.element.id) { offset, item in
                 ZoomableImageView(
-                    photo: photo,
+                    item: item,
                     isCurrent: offset == index,
                     onSingleTap: {
                         // 单击：图片侵入 bar 区域时用滑动式（滑开露出图片），
@@ -311,9 +364,9 @@ struct PhotoViewerOverlay: View {
                     },
                     onZoomChanged: { zoomed in
                         if zoomed {
-                            zoomedPages.insert(photo.id)
+                            zoomedPages.insert(item.id)
                         } else {
-                            zoomedPages.remove(photo.id)
+                            zoomedPages.remove(item.id)
                         }
                         // 放大浏览时进入沉浸模式（与原生一致）：快速淡出式隐藏（图片已盖住 bar，
                         // 慢慢淡出会显得拖沓）
@@ -322,11 +375,11 @@ struct PhotoViewerOverlay: View {
                         }
                     },
                     onImageReady: {
-                        readyPages.insert(photo.id)
+                        readyPages.insert(item.id)
                         finishOpenIfReady()
                     },
                     onImageTopChanged: { top in
-                        imageTops[photo.id] = top
+                        imageTops[item.id] = top
                     }
                 )
                 // TabView 的分页容器会给每一页重新注入安全区，页内也必须显式忽略，
@@ -342,7 +395,7 @@ struct PhotoViewerOverlay: View {
             // 拖拽接管时 TabView 的翻页手势被取消，可能瞬时抖动 index 再弹回，
             // 只在正常浏览状态下联动空白格子，避免邻居缩略图闪空白
             guard phase == .presented else { return }
-            presenter.setHiddenPhoto(currentPhoto.id)
+            presenter.setHiddenPhoto(currentItem.photoID)
         }
     }
 
@@ -361,16 +414,7 @@ struct PhotoViewerOverlay: View {
                     .contentShape(Rectangle())
             }
             Spacer()
-            Button {
-                PhotoSharing.share([currentPhoto])
-            } label: {
-                Image(systemName: "square.and.arrow.up")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel("分享")
+            moreMenu
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity)
@@ -386,23 +430,170 @@ struct PhotoViewerOverlay: View {
         }
     }
 
+    // MARK: 「…」菜单
+
+    /// 右上角「…」：分享 / 添加到相簿 / 编辑（裁剪）/ 删除；PDF 在最上面显示当前页码
+    private var moreMenu: some View {
+        Menu {
+            if let page = currentItem.page {
+                Section {
+                    Text("第 \(page + 1) / \(currentItem.pageCount) 页")
+                }
+            }
+            Section {
+                Button("分享", systemImage: "square.and.arrow.up") {
+                    if let photo = photo(for: currentItem) {
+                        PhotoSharing.share([photo])
+                    }
+                }
+                Menu("添加到相簿", systemImage: "rectangle.stack.badge.plus") {
+                    ForEach(albums) { album in
+                        Button(album.name, systemImage: "rectangle.stack") {
+                            if let photo = photo(for: currentItem) {
+                                AlbumOperations.add([photo], to: album, in: modelContext)
+                                try? modelContext.save()
+                            }
+                        }
+                    }
+                    if !albums.isEmpty {
+                        Divider()
+                    }
+                    Button("新建相簿…", systemImage: "plus") {
+                        newAlbumName = ""
+                        showingNewAlbumAlert = true
+                    }
+                }
+                // PDF 不能裁剪
+                if currentItem.page == nil {
+                    Button("编辑", systemImage: "crop") {
+                        editingItem = currentItem
+                    }
+                }
+            }
+            Section {
+                Button("删除", systemImage: "trash", role: .destructive) {
+                    pendingDeletion = currentItem
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("更多")
+    }
+
+    private func photo(for item: ViewerItem) -> Photo? {
+        let id = item.photoID
+        var descriptor = FetchDescriptor<Photo>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return (try? modelContext.fetch(descriptor))?.first
+    }
+
+    private func addCurrentToNewAlbum() {
+        guard let photo = photo(for: currentItem) else { return }
+        let trimmed = newAlbumName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let album = AlbumOperations.createAlbum(named: trimmed.isEmpty ? "未命名相簿" : trimmed, in: modelContext)
+        AlbumOperations.add([photo], to: album, in: modelContext)
+        try? modelContext.save()
+    }
+
+    /// 删除后停在原位置（即下一张；删的是末尾则前一张）；删光了就原地缩小淡出关闭（格子已不在，不落回）
+    private func delete(_ item: ViewerItem) {
+        guard let photo = photo(for: item) else { return }
+        let remaining = items.filter { $0.photoID != item.photoID }
+        let position = items.firstIndex { $0.photoID == item.photoID } ?? index
+        AlbumOperations.deletePhotos([photo], in: modelContext)
+        try? modelContext.save()
+        guard !remaining.isEmpty else {
+            beginClose(returnsToGrid: false)
+            return
+        }
+        items = remaining
+        index = min(position, remaining.count - 1)
+        presenter.setHiddenPhoto(currentItem.photoID)
+    }
+
+    /// 编辑（裁剪 / 复原）后：换成新尺寸、新版本号的页（id 变了，翻页器重新加载这一页）
+    private func reloadItems(of photoID: UUID) {
+        let id = photoID
+        var descriptor = FetchDescriptor<Photo>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        guard let photo = (try? modelContext.fetch(descriptor))?.first,
+              let first = items.firstIndex(where: { $0.photoID == photoID })
+        else {
+            return
+        }
+        let count = items[first...].prefix { $0.photoID == photoID }.count
+        items.replaceSubrange(first..<(first + count), with: ViewerItem.items(for: photo))
+    }
+
     // MARK: 胶片条
 
-    /// 当前张展开为原始比例（拖动中不展开）
-    private var expandedFilmstripID: UUID? {
-        isScrubbing ? nil : currentPhoto.id
+    /// 当前页展开为原始比例（拖动中不展开）
+    private var expandedFilmstripID: String? {
+        isScrubbing ? nil : currentItem.id
+    }
+
+    /// 胶片条一格的排布。普通照片之间 2pt，当前张两侧各再空出 4pt；
+    /// 多页 PDF 的各页叠成一组（每页只露出一截，后一页压在前一页上），正在看的 PDF 整组两侧空出、
+    /// 与前后照片隔开，组内当前页完整露出、压在最上面（看得出在看 PDF 的哪一页）
+    private struct FilmstripSlot {
+        var width: CGFloat
+        /// 在条里占的宽度（叠放的页小于 width，多出的部分压在后一格下面）
+        var layoutWidth: CGFloat
+        var leading: CGFloat
+        var trailing: CGFloat
+        var isStackedPage: Bool
+        var isOnTop: Bool
+    }
+
+    private static let filmstripGap: CGFloat = 1
+    private static let filmstripCurrentGap: CGFloat = 5
+    /// 叠放的 PDF 页露出的宽度
+    private static let filmstripStackStep: CGFloat = 9
+
+    private func filmstripSlot(for item: ViewerItem) -> FilmstripSlot {
+        let expanded = item.id == expandedFilmstripID
+        let itemSize = Self.filmstripItemSize
+        let width = expanded
+            ? min(max(itemSize.height * item.aspectRatio, itemSize.width), itemSize.height * 1.8)
+            : itemSize.width
+        guard let page = item.page, item.pageCount > 1 else {
+            let gap = expanded ? Self.filmstripCurrentGap : Self.filmstripGap
+            return FilmstripSlot(width: width, layoutWidth: width, leading: gap, trailing: gap,
+                                 isStackedPage: false, isOnTop: expanded)
+        }
+        let groupGap = item.photoID == currentItem.photoID && !isScrubbing
+            ? Self.filmstripCurrentGap : Self.filmstripGap
+        let isFirst = page == 0
+        let isLast = page == item.pageCount - 1
+        let innerGap: CGFloat = expanded ? 2 : 0
+        return FilmstripSlot(
+            width: width,
+            layoutWidth: expanded || isLast ? width : Self.filmstripStackStep,
+            leading: isFirst ? groupGap : innerGap,
+            trailing: isLast ? groupGap : innerGap,
+            isStackedPage: true,
+            isOnTop: expanded)
     }
 
     private var filmstrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: 2) {
-                ForEach(session.photos, id: \.id) { photo in
-                    FilmstripThumbnail(
-                        photo: photo, itemSize: Self.filmstripItemSize,
-                        expanded: photo.id == expandedFilmstripID)
-                    .id(photo.id)
-                    .contentShape(Rectangle())
-                    .onTapGesture { jumpFromFilmstrip(to: photo.id) }
+            LazyHStack(spacing: 0) {
+                ForEach(items) { item in
+                    let slot = filmstripSlot(for: item)
+                    FilmstripThumbnail(item: item, size: CGSize(width: slot.width, height: Self.filmstripItemSize.height),
+                                       showsEdge: slot.isStackedPage)
+                        .frame(width: slot.layoutWidth, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { jumpFromFilmstrip(to: item.id) }
+                        .id(item.id)
+                        .padding(.leading, slot.leading)
+                        .padding(.trailing, slot.trailing)
+                        .zIndex(slot.isOnTop ? 1 : 0)
                 }
             }
             .scrollTargetLayout()
@@ -421,10 +612,10 @@ struct PhotoViewerOverlay: View {
                 centerFilmstrip(animated: true)
             }
         }
-        .onChange(of: filmstripPosition.viewID(type: UUID.self)) { _, id in
+        .onChange(of: filmstripPosition.viewID(type: String.self)) { _, id in
             // 只响应用户拖动：程序滚动（翻页联动）不反向改页码
-            guard isScrubbing, let id, id != currentPhoto.id,
-                  let target = session.photos.firstIndex(where: { $0.id == id }) else { return }
+            guard isScrubbing, let id, id != currentItem.id,
+                  let target = items.firstIndex(where: { $0.id == id }) else { return }
             index = target
         }
         .onChange(of: index) {
@@ -438,12 +629,12 @@ struct PhotoViewerOverlay: View {
             centerFilmstrip(animated: false)
         }
         #if DEBUG
-        // 调试：FILMSTRIP_JUMP=n 打开 1.5s 后模拟点按胶片条第 n 张（验证翻页器与胶片条联动）
+        // 调试：FILMSTRIP_JUMP=n 打开 1.5s 后模拟点按胶片条第 n 格（验证翻页器与胶片条联动）
         .task {
             guard let raw = ProcessInfo.processInfo.environment["FILMSTRIP_JUMP"], let target = Int(raw),
-                  session.photos.indices.contains(target) else { return }
+                  items.indices.contains(target) else { return }
             try? await Task.sleep(for: .seconds(1.5))
-            jumpFromFilmstrip(to: session.photos[target].id)
+            jumpFromFilmstrip(to: items[target].id)
         }
         #endif
         .frame(height: Self.filmstripHeight)
@@ -458,7 +649,7 @@ struct PhotoViewerOverlay: View {
     }
 
     private func centerFilmstrip(animated: Bool) {
-        let id = currentPhoto.id
+        let id = currentItem.id
         if animated {
             withAnimation(.easeOut(duration: 0.25)) { filmstripPosition.scrollTo(id: id, anchor: .center) }
         } else {
@@ -466,8 +657,8 @@ struct PhotoViewerOverlay: View {
         }
     }
 
-    private func jumpFromFilmstrip(to photoID: UUID) {
-        guard let target = session.photos.firstIndex(where: { $0.id == photoID }) else { return }
+    private func jumpFromFilmstrip(to itemID: String) {
+        guard let target = items.firstIndex(where: { $0.id == itemID }) else { return }
         index = target
     }
 
@@ -485,24 +676,24 @@ struct PhotoViewerOverlay: View {
 
     // MARK: 打开
 
-    private var currentPhoto: Photo {
-        session.photos[max(0, min(index, session.photos.count - 1))]
+    private var currentItem: ViewerItem {
+        items[max(0, min(index, items.count - 1))]
     }
 
     private func beginOpen() {
         // 打开时状态栏可见，捕获稳定的状态栏高度供 bar 布局使用
         stableSafeTop = liveStatusBarHeight
         stableSafeBottom = liveBottomInset
-        let photo = currentPhoto
-        let image = loadTransitionImage(for: photo)
+        let item = currentItem
+        let image = loadTransitionImage(for: item)
         transitionImage = image
-        let target = fitRect(for: imageSize(of: photo, image: image), in: containerSize)
+        let target = fitRect(for: imageSize(of: item, image: image), in: containerSize)
         // 预热大图（翻页器当前页也在同步加载，就绪后过渡层才让位）
-        Task { _ = await ThumbnailCache.shared.image(for: photo.id, kind: .large) }
+        Task { _ = await item.image(.large) }
 
         let screen = CGRect(origin: .zero, size: containerSize)
         let visible = gridVisibleRect
-        if let source = session.sourceFrame(photo.id), source.intersects(visible) {
+        if let source = session.sourceFrame(item.photoID), source.intersects(visible) {
             transitionRect = source
             maskRect = source.intersection(visible)
             transitionOpacity = 1
@@ -536,27 +727,28 @@ struct PhotoViewerOverlay: View {
 
     /// 过渡动画结束 + 当前页图片就绪，两个条件都满足才把画面交给翻页器（无缝）
     private func finishOpenIfReady() {
-        guard phase == .opening, openAnimationDone, readyPages.contains(currentPhoto.id) else { return }
+        guard phase == .opening, openAnimationDone, readyPages.contains(currentItem.id) else { return }
         phase = .presented
     }
 
     // MARK: 关闭
 
-    private func beginClose() {
+    /// returnsToGrid=false：不落回格子、原地缩小淡出（刚删除的照片，格子已不在）
+    private func beginClose(returnsToGrid: Bool = true) {
         guard phase == .presented || phase == .dragging else { return }
         // 拖拽发起的关闭以拖拽开始时锁定的照片为准，不受 index 瞬时抖动影响
-        let photo: Photo
-        if phase == .dragging, let dragID = draggingPhotoID,
-           let dragged = session.photos.first(where: { $0.id == dragID }) {
-            photo = dragged
+        let item: ViewerItem
+        if phase == .dragging, let dragID = draggingItemID,
+           let dragged = items.first(where: { $0.id == dragID }) {
+            item = dragged
         } else {
-            photo = currentPhoto
+            item = currentItem
         }
         if phase == .presented {
             // 从静止状态关闭：过渡层先在原位接管画面（与翻页器逐像素重合，切换无缝）
-            let image = loadTransitionImage(for: photo)
+            let image = loadTransitionImage(for: item)
             transitionImage = image
-            transitionRect = fitRect(for: imageSize(of: photo, image: image), in: containerSize)
+            transitionRect = fitRect(for: imageSize(of: item, image: image), in: containerSize)
             transitionOpacity = 1
         }
         phase = .closing
@@ -564,7 +756,7 @@ struct PhotoViewerOverlay: View {
         let screen = CGRect(origin: .zero, size: containerSize)
         let visible = gridVisibleRect
         maskRect = screen
-        if let target = session.sourceFrame(photo.id), target.intersects(visible) {
+        if returnsToGrid, let target = session.sourceFrame(item.photoID), target.intersects(visible) {
             withAnimation(
                 .spring(response: 0.28 * Self.slowFactor, dampingFraction: 0.88),
                 completionCriteria: .logicallyComplete
@@ -629,12 +821,12 @@ struct PhotoViewerOverlay: View {
                     } completion: {
                         if phase == .dragging {
                             // 校正可能被取消手势抖走的页码，再交还给翻页器
-                            if let dragID = draggingPhotoID,
-                               let draggedIndex = session.photos.firstIndex(where: { $0.id == dragID }) {
+                            if let dragID = draggingItemID,
+                               let draggedIndex = items.firstIndex(where: { $0.id == dragID }) {
                                 index = draggedIndex
                             }
                             phase = .presented
-                            presenter.setHiddenPhoto(currentPhoto.id)
+                            presenter.setHiddenPhoto(currentItem.photoID)
                             // 弹回后恢复 bar（跟随 backdropOpacity 淡回）
                             withAnimation(.easeOut(duration: 0.2)) {
                                 chromeSuppressed = false
@@ -646,13 +838,13 @@ struct PhotoViewerOverlay: View {
     }
 
     private func enterDragMode() {
-        let photo = currentPhoto
-        let image = loadTransitionImage(for: photo)
+        let item = currentItem
+        let image = loadTransitionImage(for: item)
         transitionImage = image
-        draggingPhotoID = photo.id
-        presenter.setHiddenPhoto(photo.id)
+        draggingItemID = item.id
+        presenter.setHiddenPhoto(item.photoID)
         chromeSuppressed = true
-        dragFitRect = fitRect(for: imageSize(of: photo, image: image), in: containerSize)
+        dragFitRect = fitRect(for: imageSize(of: item, image: image), in: containerSize)
         transitionRect = dragFitRect
         maskRect = CGRect(origin: .zero, size: containerSize)
         transitionOpacity = 1
@@ -669,18 +861,22 @@ struct PhotoViewerOverlay: View {
 
     // MARK: 工具
 
-    private func loadTransitionImage(for photo: Photo) -> UIImage? {
-        ThumbnailCache.shared.cachedImage(for: photo.id, kind: .large)
-            ?? ThumbnailCache.shared.cachedImage(for: photo.id, kind: .small)
-            ?? ImageStore.shared.loadThumbnail(photoID: photo.id, kind: .small)
+    private func loadTransitionImage(for item: ViewerItem) -> UIImage? {
+        if let cached = item.cachedImage(.large) ?? item.cachedImage(.small) {
+            return cached
+        }
+        // 图片 / PDF 首页：格子用的缩略图；PDF 其他页：胶片条的小图
+        return (item.page ?? 0) == 0
+            ? ImageStore.shared.loadThumbnail(photoID: item.photoID, kind: .small)
+            : item.cachedImage(.tiny)
     }
 
-    private func imageSize(of photo: Photo, image: UIImage?) -> CGSize {
+    private func imageSize(of item: ViewerItem, image: UIImage?) -> CGSize {
         if let image {
             return image.size
         }
-        if photo.width > 0, photo.height > 0 {
-            return CGSize(width: photo.width, height: photo.height)
+        if item.aspectRatio > 0 {
+            return CGSize(width: 1000 * item.aspectRatio, height: 1000)
         }
         return containerSize
     }
@@ -699,19 +895,14 @@ struct PhotoViewerOverlay: View {
     }
 }
 
-/// 胶片条里的一格：平时为窄条，当前张展开为原始宽高比（限宽）
+/// 胶片条里的一格（宽度由排布决定：平时窄条，当前页展开为原始比例）
 private struct FilmstripThumbnail: View {
-    let photo: Photo
-    let itemSize: CGSize
-    let expanded: Bool
+    let item: ViewerItem
+    let size: CGSize
+    /// 叠放的 PDF 页：加一道阴影，看得出页与页的边界
+    let showsEdge: Bool
 
     @State private var image: UIImage?
-
-    private var width: CGFloat {
-        guard expanded else { return itemSize.width }
-        let aspect = photo.height > 0 ? CGFloat(photo.width) / CGFloat(photo.height) : 1
-        return min(max(itemSize.height * aspect, itemSize.width), itemSize.height * 1.8)
-    }
 
     var body: some View {
         Color(.secondarySystemFill)
@@ -722,16 +913,15 @@ private struct FilmstripThumbnail: View {
                         .scaledToFill()
                 }
             }
-            .frame(width: width, height: itemSize.height)
+            .frame(width: size.width, height: size.height)
             .clipped()
-            .padding(.horizontal, expanded ? 4 : 0)
-            .task(id: photo.id) {
-                if let cached = ThumbnailCache.shared.cachedImage(for: photo.id, kind: .tiny)
-                    ?? ThumbnailCache.shared.cachedImage(for: photo.id, kind: .small) {
+            .shadow(color: .black.opacity(showsEdge ? 0.35 : 0), radius: 1.5, x: 0.5)
+            .task(id: item.id) {
+                if let cached = item.cachedImage(.tiny) ?? item.cachedImage(.small) {
                     image = cached
                     return
                 }
-                image = await ThumbnailCache.shared.image(for: photo.id, kind: .tiny)
+                image = await item.image(.tiny)
             }
     }
 }

@@ -3,8 +3,9 @@ import UIKit
 
 /// 查看器单页：UIScrollView 实现的双击/捏合缩放 + 平移（原生照片同款手感）。
 /// 缩放时通知外层（缩放中禁用下拉关闭）；翻页离开时自动复位缩放。
+/// PDF 矢量页在底图上再叠一层分块矢量重绘（PDFTiledPageView），放大到任意倍数都清晰
 struct ZoomableImageView: UIViewRepresentable {
-    let photo: Photo
+    let item: ViewerItem
     let isCurrent: Bool
     var onSingleTap: () -> Void
     var onZoomChanged: (Bool) -> Void
@@ -51,7 +52,14 @@ struct ZoomableImageView: UIViewRepresentable {
         singleTap.require(toFail: doubleTap)
         scrollView.addGestureRecognizer(singleTap)
 
-        coordinator.loadImage(photoID: photo.id)
+        if item.isVectorPage, let page = item.page {
+            let tiled = PDFTiledPageView(photoID: item.photoID, page: page)
+            tiled.frame = imageView.bounds
+            tiled.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            imageView.addSubview(tiled)
+        }
+
+        coordinator.loadImage(item: item)
         return scrollView
     }
 
@@ -74,15 +82,28 @@ struct ZoomableImageView: UIViewRepresentable {
             self.parent = parent
         }
 
-        func loadImage(photoID: UUID) {
+        func loadImage(item: ViewerItem) {
             loadTask = Task { [weak self] in
-                let image = await ThumbnailCache.shared.image(for: photoID, kind: .large)
+                let image = await item.image(.large)
                 guard let self, !Task.isCancelled else { return }
                 if let image {
                     self.imageView?.image = image
                     self.layoutImage()
                 }
                 self.parent.onImageReady?()
+                #if DEBUG
+                // VIEWER_ZOOM=n：当前页加载后 1s 放大到 n 倍（以中心为焦点），验证 PDF 矢量页放大后的清晰度
+                if self.parent.isCurrent, let raw = ProcessInfo.processInfo.environment["VIEWER_ZOOM"],
+                   let scale = Double(raw) {
+                    try? await Task.sleep(for: .seconds(1))
+                    self.scrollView?.setZoomScale(scale, animated: false)
+                    if let scrollView = self.scrollView {
+                        scrollView.contentOffset = CGPoint(
+                            x: (scrollView.contentSize.width - scrollView.bounds.width) / 2,
+                            y: (scrollView.contentSize.height - scrollView.bounds.height) / 2)
+                    }
+                }
+                #endif
             }
         }
 
@@ -203,4 +224,64 @@ private final class LayoutCallbackScrollView: UIScrollView {
         super.layoutSubviews()
         onLayout?()
     }
+}
+
+/// PDF 矢量页的分块重绘层：随缩放按当前分辨率重绘（CATiledLayer），底下的位图只是占位底图。
+/// 分块在后台线程绘制，绘制交给独立的图层代理（不经 UIView，UIView 只能在主线程用）
+private final class PDFTiledPageView: UIView {
+    private let tiledLayer = NoFadeTiledLayer()
+    private let drawer: PDFPageDrawer
+
+    init(photoID: UUID, page index: Int) {
+        drawer = PDFPageDrawer(page: PDFPageStore.shared.cgPage(photoID: photoID, index: index))
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        // 查看器最大放大 6 倍 × 3x 屏：细节层级要到 2^5
+        tiledLayer.levelsOfDetail = 1
+        tiledLayer.levelsOfDetailBias = 5
+        tiledLayer.tileSize = CGSize(width: 512, height: 512)
+        tiledLayer.contentsScale = UIScreen.main.scale
+        tiledLayer.delegate = drawer
+        layer.addSublayer(tiledLayer)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard tiledLayer.frame != bounds else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        tiledLayer.frame = bounds
+        tiledLayer.setNeedsDisplay()
+        CATransaction.commit()
+    }
+}
+
+private final class PDFPageDrawer: NSObject, CALayerDelegate, @unchecked Sendable {
+    private let page: CGPDFPage?
+
+    init(page: CGPDFPage?) {
+        self.page = page
+    }
+
+    func draw(_ layer: CALayer, in ctx: CGContext) {
+        guard let page else { return }
+        let bounds = layer.bounds
+        ctx.setFillColor(UIColor.white.cgColor)
+        ctx.fill(ctx.boundingBoxOfClipPath)
+        PDFPageStore.draw(page: page, in: ctx, size: bounds.size)
+    }
+
+    /// 关掉图层的隐式动画（分块重绘时 contents 不淡入）
+    func action(for layer: CALayer, forKey event: String) -> CAAction? {
+        NSNull()
+    }
+}
+
+/// 新分块直接出现、不淡入：底图与分块是同一页，淡入时能看到糊 → 清的过程
+private final class NoFadeTiledLayer: CATiledLayer {
+    override class func fadeDuration() -> CFTimeInterval { 0 }
 }

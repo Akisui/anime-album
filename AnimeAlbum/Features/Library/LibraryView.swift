@@ -13,8 +13,6 @@ struct LibraryView: View {
     @State private var showingPhotosPicker = false
     @State private var showingFileImporter = false
     @State private var frameBox = GridFrameBox()
-    /// 正在阅读的 PDF（PDF 不进照片查看器，单独全屏分页阅读）
-    @State private var openPDF: Photo?
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -58,10 +56,10 @@ struct LibraryView: View {
                 try? await Task.sleep(for: .seconds(1))
                 toggleSelectionMode()
             }
-            // OPEN_PDF=1 打开图库里第一个 PDF（配合 SEED_PDF=1）
+            // OPEN_PDF=1 打开图库里第一个 PDF（配合 SEED_PDF=1）；PDF_PAGE=n 打开到第 n 页（从 0 起）
             if env["OPEN_PDF"] == "1", let index = photos.firstIndex(where: \.isPDF) {
                 try? await Task.sleep(for: .seconds(0.5))
-                openViewer(at: index)
+                openViewer(at: index, page: env["PDF_PAGE"].flatMap(Int.init) ?? 0)
             }
             if let raw = env["OPEN_INDEX"], let target = Int(raw), photos.indices.contains(target) {
                 try? await Task.sleep(for: .seconds(0.5))
@@ -72,7 +70,6 @@ struct LibraryView: View {
             }
             #endif
         }
-        .fullScreenCover(item: $openPDF) { PDFReaderView(photo: $0) }
         .photosPicker(isPresented: $showingPhotosPicker, selection: $pickerItems, matching: .images)
         .fileImporter(
             isPresented: $showingFileImporter,
@@ -226,19 +223,12 @@ struct LibraryView: View {
         )
     }
 
-    private func openViewer(at index: Int) {
+    /// PDF 也在查看器里看：按页展开成一张张图片（见 ViewerItem）
+    private func openViewer(at index: Int, page: Int = 0) {
         guard photos.indices.contains(index) else { return }
-        let photo = photos[index]
-        if photo.isPDF {
-            openPDF = photo
-            return
-        }
-        // 查看器只翻图片（PDF 在查看器里没有分页能力，点开走阅读器）
-        let images = photos.filter { !$0.isPDF }
-        guard let imageIndex = images.firstIndex(where: { $0.id == photo.id }) else { return }
         let box = frameBox
         viewerPresenter.present(
-            photos: images, index: imageIndex,
+            photos: photos, index: index, page: page,
             sourceFrame: { box.lookup?($0) },
             sourceVisibleRect: { box.visibleRect?() })
     }

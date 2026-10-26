@@ -15,7 +15,6 @@ struct AlbumDetailView: View {
     @State private var showingFileImporter = false
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var frameBox = GridFrameBox()
-    @State private var openPDF: Photo?
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -53,18 +52,10 @@ struct AlbumDetailView: View {
                 ReorderablePhotoGrid(
                     photos: photos,
                     onTap: { index in
-                        let list = photos
-                        guard list.indices.contains(index) else { return }
-                        if list[index].isPDF {
-                            openPDF = list[index]
-                            return
-                        }
-                        // 查看器只翻图片，PDF 走阅读器
-                        let images = list.filter { !$0.isPDF }
-                        guard let imageIndex = images.firstIndex(where: { $0.id == list[index].id }) else { return }
+                        // PDF 也在查看器里按页看（见 ViewerItem）
                         let box = frameBox
                         viewerPresenter.present(
-                            photos: images, index: imageIndex,
+                            photos: photos, index: index,
                             sourceFrame: { box.lookup?($0) },
                             sourceVisibleRect: { box.visibleRect?() })
                     },
@@ -97,7 +88,6 @@ struct AlbumDetailView: View {
                 exitSelectionMode()
             }
         }
-        .fullScreenCover(item: $openPDF) { PDFReaderView(photo: $0) }
         .sheet(isPresented: $showingPicker) {
             AlbumPhotoPickerSheet(album: album)
         }

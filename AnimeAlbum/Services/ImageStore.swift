@@ -176,6 +176,8 @@ final class ImageStore: Sendable {
             deleteFiles(relativePath: relativePath, photoID: photoID)
             throw error
         }
+        // 拆页（矢量页保持矢量、扫描页转无损图片），查看器按页浏览
+        PDFPageStore.shared.prepare(photoID: photoID, pdfData: data)
         return StoredImage(relativePath: relativePath, width: width, height: height, pageCount: document.pageCount)
     }
 
@@ -321,15 +323,17 @@ final class ImageStore: Sendable {
         return UIImage(cgImage: cgImage)
     }
 
-    private func rebuildThumbnail(photoID: UUID, kind: ThumbnailKind) {
+    /// 原图文件（originals/<桶>/<uuid>.<扩展名>）
+    func originalURL(photoID: UUID) -> URL? {
         let bucket = originalsURL.appendingPathComponent(
             String(photoID.uuidString.prefix(2)).lowercased(), isDirectory: true)
-        guard let filename = (try? FileManager.default.contentsOfDirectory(atPath: bucket.path))?
-                .first(where: { $0.hasPrefix(photoID.uuidString) })
-        else {
-            return
-        }
-        let fileURL = bucket.appendingPathComponent(filename)
+        return (try? FileManager.default.contentsOfDirectory(atPath: bucket.path))?
+            .first(where: { $0.hasPrefix(photoID.uuidString) })
+            .map { bucket.appendingPathComponent($0) }
+    }
+
+    private func rebuildThumbnail(photoID: UUID, kind: ThumbnailKind) {
+        guard let fileURL = originalURL(photoID: photoID) else { return }
         let imageSource: CGImageSource? = fileURL.pathExtension.lowercased() == "pdf"
             ? PDFDocument(url: fileURL).flatMap(Self.firstPageImageSource(of:))
             : CGImageSourceCreateWithURL(fileURL as CFURL, nil)
@@ -342,6 +346,149 @@ final class ImageStore: Sendable {
         try? writeThumbnail(from: source, photoID: photoID, kind: kind, width: width, height: height)
     }
 
+    // MARK: - 编辑（裁剪）
+
+    /// 第一次裁剪时原图移到 unedited/<桶>/<uuid>.<扩展名> 备份（可复原；查重仍按原图哈希），
+    /// 同名 .json 记着当前裁剪框（相对未编辑原图、归一化）—— 再次编辑时从原图和这个框开始
+    private func uneditedDirectory(photoID: UUID) -> URL {
+        baseURL.appendingPathComponent("unedited/\(String(photoID.uuidString.prefix(2)).lowercased())", isDirectory: true)
+    }
+
+    private func uneditedOriginalURL(photoID: UUID) -> URL? {
+        let directory = uneditedDirectory(photoID: photoID)
+        return (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?
+            .first { $0.hasPrefix(photoID.uuidString) && !$0.hasSuffix(".json") }
+            .map { directory.appendingPathComponent($0) }
+    }
+
+    private func cropRecordURL(photoID: UUID) -> URL {
+        uneditedDirectory(photoID: photoID).appendingPathComponent("\(photoID.uuidString).json")
+    }
+
+    struct EditingBase: @unchecked Sendable {
+        /// 未编辑的原图（显示用，长边 ≤ 2048）
+        let image: UIImage
+        /// 当前裁剪框（归一化，相对 image）；未裁剪时为整张
+        let crop: CGRect
+    }
+
+    /// 编辑器的起点：未编辑原图（没编辑过就是当前原图）+ 当前裁剪框
+    func editingBase(photoID: UUID) -> EditingBase? {
+        guard let url = uneditedOriginalURL(photoID: photoID) ?? originalURL(photoID: photoID),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = Self.orientedImage(from: source, maxPixel: 2048)
+        else {
+            return nil
+        }
+        var crop = CGRect(x: 0, y: 0, width: 1, height: 1)
+        if uneditedOriginalURL(photoID: photoID) != nil,
+           let data = try? Data(contentsOf: cropRecordURL(photoID: photoID)),
+           let values = try? JSONDecoder().decode([Double].self, from: data), values.count == 4 {
+            crop = CGRect(x: values[0], y: values[1], width: values[2], height: values[3])
+        }
+        return EditingBase(image: UIImage(cgImage: image), crop: crop)
+    }
+
+    /// 按归一化裁剪框（相对未编辑原图）生成新的原图并重建缩略图；框为整张时复原。
+    /// 返回新的原图信息（尺寸、扩展名可能变）
+    func applyCrop(photoID: UUID, crop: CGRect) throws -> StoredImage {
+        let fileManager = FileManager.default
+        let full = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let isFull = abs(crop.minX) < 0.001 && abs(crop.minY) < 0.001
+            && abs(crop.width - 1) < 0.001 && abs(crop.height - 1) < 0.001
+        let bucket = String(photoID.uuidString.prefix(2)).lowercased()
+
+        // 复原：备份移回原位
+        if isFull {
+            guard let backup = uneditedOriginalURL(photoID: photoID) else {
+                throw ImageStoreError.unreadableImage
+            }
+            if let current = originalURL(photoID: photoID) {
+                try? fileManager.removeItem(at: current)
+            }
+            let relativePath = "originals/\(bucket)/\(backup.lastPathComponent)"
+            try fileManager.moveItem(at: backup, to: url(forRelativePath: relativePath))
+            try? fileManager.removeItem(at: cropRecordURL(photoID: photoID))
+            return try rebuildAllThumbnails(photoID: photoID, relativePath: relativePath)
+        }
+
+        // 第一次编辑：先把原图移去备份
+        if uneditedOriginalURL(photoID: photoID) == nil {
+            guard let current = originalURL(photoID: photoID) else { throw ImageStoreError.unreadableImage }
+            try fileManager.createDirectory(at: uneditedDirectory(photoID: photoID), withIntermediateDirectories: true)
+            try fileManager.moveItem(at: current, to: uneditedDirectory(photoID: photoID)
+                .appendingPathComponent(current.lastPathComponent))
+        }
+        guard let backup = uneditedOriginalURL(photoID: photoID),
+              let source = CGImageSourceCreateWithURL(backup as CFURL, nil),
+              let oriented = Self.orientedImage(from: source, maxPixel: nil)
+        else {
+            throw ImageStoreError.unreadableImage
+        }
+        let bounds = CGRect(x: 0, y: 0, width: oriented.width, height: oriented.height)
+        let clamped = crop.intersection(full)
+        let pixelRect = CGRect(x: clamped.minX * bounds.width, y: clamped.minY * bounds.height,
+                               width: clamped.width * bounds.width, height: clamped.height * bounds.height).integral
+            .intersection(bounds)
+        guard let cropped = oriented.cropping(to: pixelRect) else { throw ImageStoreError.unreadableImage }
+
+        // 尽量保持原格式（JPEG / PNG / HEIC…），编码不了的退回 PNG（无损）
+        let sourceType = CGImageSourceGetType(source).flatMap { UTType($0 as String) } ?? .png
+        var properties = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        properties[kCGImagePropertyOrientation] = 1
+        properties[kCGImagePropertyPixelWidth] = nil
+        properties[kCGImagePropertyPixelHeight] = nil
+        properties[kCGImageDestinationLossyCompressionQuality] = 0.95
+        if let current = originalURL(photoID: photoID) {
+            try? fileManager.removeItem(at: current)
+        }
+        var written: String?
+        for type in [sourceType, .png] {
+            let ext = type.preferredFilenameExtension ?? "png"
+            let relativePath = "originals/\(bucket)/\(photoID.uuidString).\(ext)"
+            let destinationURL = url(forRelativePath: relativePath)
+            guard let destination = CGImageDestinationCreateWithURL(
+                destinationURL as CFURL, type.identifier as CFString, 1, nil)
+            else {
+                continue
+            }
+            CGImageDestinationAddImage(destination, cropped, properties as CFDictionary)
+            if CGImageDestinationFinalize(destination) {
+                written = relativePath
+                break
+            }
+            try? fileManager.removeItem(at: destinationURL)
+        }
+        guard let relativePath = written else { throw ImageStoreError.thumbnailFailed }
+        let record = [clamped.minX, clamped.minY, clamped.width, clamped.height].map(Double.init)
+        try? JSONEncoder().encode(record).write(to: cropRecordURL(photoID: photoID), options: .atomic)
+        return try rebuildAllThumbnails(photoID: photoID, relativePath: relativePath)
+    }
+
+    private func rebuildAllThumbnails(photoID: UUID, relativePath: String) throws -> StoredImage {
+        guard let source = CGImageSourceCreateWithURL(url(forRelativePath: relativePath) as CFURL, nil) else {
+            throw ImageStoreError.unreadableImage
+        }
+        let (width, height) = Self.pixelSize(of: source)
+        for kind in ThumbnailKind.allCases {
+            try? FileManager.default.removeItem(at: thumbnailURL(photoID: photoID, kind: kind))
+            try writeThumbnail(from: source, photoID: photoID, kind: kind, width: width, height: height)
+        }
+        return StoredImage(relativePath: relativePath, width: width, height: height)
+    }
+
+    /// 按 EXIF 方向摆正后的位图；maxPixel 为 nil 时原尺寸
+    private static func orientedImage(from source: CGImageSource, maxPixel: Int?) -> CGImage? {
+        let (width, height) = pixelSize(of: source)
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel.map { min($0, max(width, height)) } ?? max(width, height),
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+
     // MARK: - 删除
 
     func deleteFiles(relativePath: String, photoID: UUID) {
@@ -349,6 +496,12 @@ final class ImageStore: Sendable {
         for kind in ThumbnailKind.allCases {
             try? FileManager.default.removeItem(at: thumbnailURL(photoID: photoID, kind: kind))
         }
+        PDFPageStore.shared.deleteFiles(photoID: photoID)
+        // 裁剪前的原图备份
+        if let backup = uneditedOriginalURL(photoID: photoID) {
+            try? FileManager.default.removeItem(at: backup)
+        }
+        try? FileManager.default.removeItem(at: cropRecordURL(photoID: photoID))
     }
 
     // MARK: - 私有

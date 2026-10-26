@@ -15,6 +15,8 @@ final class Photo {
     var mediaType: String = Photo.MediaType.image.rawValue
     /// PDF 的页数（图片为 0）
     var pageCount: Int = 0
+    /// 编辑（裁剪 / 复原）次数：变化时网格、封面、查看器重新加载缩略图
+    var editRevision: Int = 0
 
     @Relationship(deleteRule: .cascade, inverse: \AlbumEntry.photo)
     var entries: [AlbumEntry]?

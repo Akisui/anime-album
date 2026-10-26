@@ -297,6 +297,7 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
                 aspectLayout.aspectRatios = aspectRatios
             }
             let ids = photos.map(\.id)
+            reloadEditedPhotos(photos)
             guard ids != dataSource.snapshot().itemIdentifiers else { return }
 
             var snapshot = NSDiffableDataSourceSnapshot<Int, UUID>()
@@ -314,6 +315,20 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
             for footer in collectionView?.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionFooter) ?? [] {
                 (footer as? GridFooterView)?.label.text = footerText
             }
+        }
+
+        /// 各照片的编辑次数：变了（裁剪 / 复原）就重载那几格的缩略图
+        private var editRevisions: [UUID: Int] = [:]
+
+        private func reloadEditedPhotos(_ photos: [Photo]) {
+            let revisions = Dictionary(photos.map { ($0.id, $0.editRevision) }, uniquingKeysWith: { first, _ in first })
+            defer { editRevisions = revisions }
+            guard !editRevisions.isEmpty else { return }
+            let edited = revisions.filter { id, revision in editRevisions[id].map { $0 != revision } ?? false }.map(\.key)
+            guard !edited.isEmpty else { return }
+            var snapshot = dataSource.snapshot()
+            snapshot.reconfigureItems(edited.filter { snapshot.indexOfItem($0) != nil })
+            dataSource.apply(snapshot, animatingDifferences: false)
         }
 
         /// 「N 张照片、M 个 PDF」
@@ -1221,6 +1236,7 @@ extension ReorderablePhotoGrid.Coordinator {
 /// 相簿里长按的放大节奏：按下稍等后开始浮起，长按识别（震动）时正好到 1.1 倍，继续按住则接着缓慢放大，
 /// 到弹出菜单时停住。整段是同一条减速曲线 x = 1 − (1 − u)³（u：从开始浮起到菜单弹出的时间进度）、一个动画，
 /// 震动处速度连续 —— 拆成「浮起 ease-out + 按住」两段时，震动那一下会停住再起步
+@MainActor
 struct PressCurve {
     /// 浮起到 1.1 倍的时长（开始浮起 → 长按识别）
     let liftDuration: TimeInterval

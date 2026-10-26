@@ -280,7 +280,8 @@ struct AlbumCoverView: View {
             .clipShape(shape)
             // 发丝描边：浅色封面贴在白底上时也有清晰边界
             .overlay(shape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
-            .task(id: photo?.id) {
+            // 裁剪后（editRevision 变了）重新加载
+            .task(id: "\(photo?.id.uuidString ?? "")#\(photo?.editRevision ?? 0)") {
                 guard let photo else {
                     image = nil
                     return
