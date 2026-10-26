@@ -23,6 +23,33 @@ final class ViewerPresenter {
     /// 当前在查看器中的照片：其网格格子渲染为空白（图片"离开/回到"格子的逻辑），
     /// 关闭动画完全结束（end()）时才恢复显示
     private(set) var hiddenPhotoID: UUID?
+    /// 网格直接订阅 hiddenPhotoID（同步回调）。不用 withObservationTracking：它的 onChange 在值改之前触发，
+    /// 要拿新值只能推到下一轮主循环 —— 关闭查看器时过渡图层在这一帧移除、格子下一帧才显示，
+    /// 中间一帧露出白底（「回到缩略图后偶尔闪白」）
+    @ObservationIgnored private var hiddenPhotoObservers: [ObjectIdentifier: (UUID?) -> Void] = [:]
+
+    func addHiddenPhotoObserver(_ owner: AnyObject, _ handler: @escaping (UUID?) -> Void) {
+        hiddenPhotoObservers[ObjectIdentifier(owner)] = handler
+        handler(hiddenPhotoID)
+    }
+
+    func removeHiddenPhotoObserver(_ owner: AnyObject) {
+        hiddenPhotoObservers[ObjectIdentifier(owner)] = nil
+    }
+
+    private func notifyHiddenPhoto() {
+        #if DEBUG
+        // HIDDEN_ASYNC=1：推到下一轮主循环再通知（旧行为，对照用）
+        if ProcessInfo.processInfo.environment["HIDDEN_ASYNC"] == "1" {
+            let id = hiddenPhotoID
+            DispatchQueue.main.async { for handler in self.hiddenPhotoObservers.values { handler(id) } }
+            return
+        }
+        #endif
+        for handler in hiddenPhotoObservers.values {
+            handler(hiddenPhotoID)
+        }
+    }
 
     /// photos 里的 PDF 按页展开；index 指 photos 里点开的那张，page 为 PDF 打开到的页
     func present(
@@ -37,19 +64,25 @@ final class ViewerPresenter {
         let pages = items[first...].prefix { $0.photoID == photoID }.count
         chromeHidden = false
         hiddenPhotoID = photoID
+        notifyHiddenPhoto()
         session = Session(
             items: items, initialIndex: first + max(0, min(page, pages - 1)),
             sourceFrame: sourceFrame, sourceVisibleRect: sourceVisibleRect)
     }
 
     func setHiddenPhoto(_ id: UUID?) {
+        guard id != hiddenPhotoID else { return }
         hiddenPhotoID = id
+        notifyHiddenPhoto()
     }
 
     func end() {
         session = nil
         chromeHidden = false
-        hiddenPhotoID = nil
+        if hiddenPhotoID != nil {
+            hiddenPhotoID = nil
+            notifyHiddenPhoto()
+        }
     }
 }
 
@@ -636,6 +669,15 @@ struct PhotoViewerOverlay: View {
             try? await Task.sleep(for: .seconds(0.6))
             monitor.stop()
             print("PAGER_HITCHES during-swipe count=\(during.count) total=\(during.reduce(0, +))ms max=\(during.max() ?? 0)ms | other count=\(other.count) total=\(other.reduce(0, +))ms")
+            // VIEWER_ACTION=closeafter：翻完再关闭
+            if env["VIEWER_ACTION"] == "closeafter" {
+                // CLOSE_EVICT=1：关闭前清空缩略图缓存（模拟看了很多大图后小缩略图被挤出缓存）
+                if env["CLOSE_EVICT"] == "1" {
+                    ThumbnailCache.shared.debugRemoveAll()
+                    print("CELL_CONFIGURE --- cache cleared, closing")
+                }
+                beginClose()
+            }
         }
     }
     #endif
@@ -737,6 +779,9 @@ struct PhotoViewerOverlay: View {
         let visible = gridVisibleRect
         maskRect = screen
         if returnsToGrid, let target = session.sourceFrame(item.photoID), target.intersects(visible) {
+            #if DEBUG
+            print(String(format: "CLOSE_TARGET %.0f %.0f %.0f %.0f", target.minX, target.minY, target.width, target.height))
+            #endif
             withAnimation(
                 .spring(response: 0.28 * Self.slowFactor, dampingFraction: 0.88),
                 completionCriteria: .logicallyComplete
@@ -745,6 +790,13 @@ struct PhotoViewerOverlay: View {
                 maskRect = target.intersection(visible)
                 backdropOpacity = 0
             } completion: {
+                #if DEBUG
+                // CLOSE_PROBE=1：落回前后逐帧截取格子那一小块的屏幕颜色（查「回到缩略图偶尔闪白」）
+                if ProcessInfo.processInfo.environment["CLOSE_PROBE"] == "1" {
+                    Self.probeScreen(at: CGPoint(x: target.minX + target.width / 4, y: target.minY + target.height / 4))
+                    Self.probeScreen(at: CGPoint(x: target.midX, y: target.minY + target.height * 0.12))
+                }
+                #endif
                 guard (item.page ?? 0) > 0 else {
                     // end() 同时恢复网格格子的显示 —— 图片"落回"格子的瞬间格子才重新出现
                     presenter.end()
@@ -851,6 +903,35 @@ struct PhotoViewerOverlay: View {
     }
 
     // MARK: 工具
+
+    #if DEBUG
+    /// 逐帧（共 12 帧）截取窗口上某一点的颜色并打印：录屏会漏帧，这里每一帧都拿到实际画面
+    static func probeScreen(at point: CGPoint) {
+        guard let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow)
+        else {
+            return
+        }
+        var frame = 0
+        let link = DebugDisplayLink { link in
+            frame += 1
+            let renderer = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4))
+            let image = renderer.image { _ in
+                window.drawHierarchy(in: CGRect(x: -point.x, y: -point.y, width: window.bounds.width,
+                                                height: window.bounds.height), afterScreenUpdates: false)
+            }
+            var pixel = [UInt8](repeating: 0, count: 4)
+            if let cg = image.cgImage, let context = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8,
+                                                                bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                                                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                context.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            }
+            print("CLOSE_PROBE frame=\(frame) rgb=\(pixel[0]),\(pixel[1]),\(pixel[2])")
+            if frame >= 12 { link.stop() }
+        }
+        link.start()
+    }
+    #endif
 
     private func loadTransitionImage(for item: ViewerItem) -> UIImage? {
         if let cached = item.cachedImage(.large) ?? item.cachedImage(.small) {

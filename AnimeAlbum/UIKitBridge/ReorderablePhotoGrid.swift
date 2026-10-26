@@ -16,8 +16,8 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
     /// 供查看器查询单元当前全局 frame（自绘 zoom 过渡的起点/落点）
     var frameBox: GridFrameBox?
     /// 查看器：正在查看的照片其单元渲染为空白，关闭动画结束后恢复。
-    /// 由网格自己观察 hiddenPhotoID，不经外层视图的 body —— 外层读它的话，查看器每翻一页
-    /// 图库 / 相簿整页都要重算一遍（@Query 把全部照片重新取一遍），几千张时翻页一卡一卡（采样实测）
+    /// 网格直接订阅 hiddenPhotoID（同步回调，见 ViewerPresenter），不经外层视图的 body —— 外层读它的话，
+    /// 查看器每翻一页图库 / 相簿整页都要重算一遍（@Query 把全部照片重新取一遍），几千张时翻页一卡一卡（采样实测）
     var viewerPresenter: ViewerPresenter?
     /// 选择模式：点按切换选中（不打开查看器），横向起手滑动连选
     var isSelecting = false
@@ -144,6 +144,7 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
 
     static func dismantleUIView(_ container: PhotoGridContainerView, coordinator: Coordinator) {
         coordinator.swipeSelection.detach()
+        coordinator.stopObservingHiddenPhoto()
     }
 
     // MARK: - Coordinator
@@ -348,21 +349,19 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
         private var hiddenPhotoID: UUID?
         private weak var observedPresenter: ViewerPresenter?
 
-        /// 跟踪 presenter.hiddenPhotoID：变化时只更新那两个格子
+        /// 订阅 presenter.hiddenPhotoID：变化时（同步）只更新那两个格子
         func observeHiddenPhoto(of presenter: ViewerPresenter?) {
             guard let presenter, presenter !== observedPresenter else { return }
+            observedPresenter?.removeHiddenPhotoObserver(self)
             observedPresenter = presenter
-            trackHiddenPhoto()
+            presenter.addHiddenPhotoObserver(self) { [weak self] id in
+                self?.updateHiddenPhoto(id)
+            }
         }
 
-        private func trackHiddenPhoto() {
-            guard let presenter = observedPresenter else { return }
-            let id = withObservationTracking {
-                presenter.hiddenPhotoID
-            } onChange: { [weak self] in
-                DispatchQueue.main.async { self?.trackHiddenPhoto() }
-            }
-            updateHiddenPhoto(id)
+        func stopObservingHiddenPhoto() {
+            observedPresenter?.removeHiddenPhotoObserver(self)
+            observedPresenter = nil
         }
 
         func updateHiddenPhoto(_ id: UUID?) {

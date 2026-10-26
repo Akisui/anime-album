@@ -60,6 +60,12 @@ final class ThumbnailCache: @unchecked Sendable {
         "\(photoID.uuidString)-p\(page)-\(kind.rawValue)" as NSString
     }
 
+    #if DEBUG
+    func debugRemoveAll() {
+        cache.removeAllObjects()
+    }
+    #endif
+
     func evict(photoID: UUID) {
         for kind in ThumbnailKind.allCases {
             cache.removeObject(forKey: cacheKey(photoID: photoID, kind: kind))

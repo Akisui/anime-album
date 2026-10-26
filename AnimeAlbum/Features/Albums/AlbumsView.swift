@@ -105,7 +105,12 @@ struct AlbumsView: View {
                         if isSelecting {
                             toggleSelection(album)
                         } else {
-                            navigationPath.append(album)
+                            // 明确带动画推入：偶尔按下的事务里动画被禁掉，相簿页直接出现、没有从右往左的过渡（用户反馈）
+                            var transaction = Transaction(animation: .default)
+                            transaction.disablesAnimations = false
+                            withTransaction(transaction) {
+                                navigationPath.append(album)
+                            }
                         }
                     } label: {
                         AlbumCard(album: album, isSelected: isSelecting && selectedIDs.contains(album.id))

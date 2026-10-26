@@ -96,7 +96,20 @@ struct RootView: View {
         .task {
             // 旧规则拆页的 PDF 在后台按新规则重做
             let pdfs = (try? modelContext.fetch(FetchDescriptor<Photo>()))?.filter(\.isPDF).map(\.id) ?? []
-            PDFPageStore.shared.upgrade(photoIDs: pdfs)
+            PDFPageStore.shared.upgrade(photoIDs: pdfs) { photoID, width, height in
+                Task { @MainActor in
+                    let id = photoID
+                    var descriptor = FetchDescriptor<Photo>(predicate: #Predicate { $0.id == id })
+                    descriptor.fetchLimit = 1
+                    guard let photo = (try? modelContext.fetch(descriptor))?.first else { return }
+                    photo.width = width
+                    photo.height = height
+                    // 版本号变了：网格 / 封面 / 查看器重新加载缩略图
+                    photo.editRevision += 1
+                    ThumbnailCache.shared.evict(photoID: photoID)
+                    try? modelContext.save()
+                }
+            }
             #if DEBUG
             DebugSeeder.applyLaunchTweaks()
             await DebugSeeder.seedIfRequested(context: modelContext)

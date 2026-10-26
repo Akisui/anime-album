@@ -168,17 +168,21 @@ final class ImageStore: Sendable {
             at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: destination, options: .atomic)
 
-        let (width, height) = Self.pixelSize(of: source)
+        // 拆页（矢量页保持矢量、扫描页转无损图片），查看器按页浏览
+        PDFPageStore.shared.prepare(photoID: photoID, pdfData: data, progress: progress)
+        // 网格缩略图用处理后的首页做：与查看器里的第 1 页是同一张图（扫描页裁掉了白边）。
+        // 用整页渲染的话，打开时过渡图带白边、小一圈，大图换上后突然变大（用户反馈）
+        let cover = PDFPageStore.shared.firstPagePreviewURL(photoID: photoID)
+            .flatMap { CGImageSourceCreateWithURL($0 as CFURL, nil) } ?? source
+        let (width, height) = Self.pixelSize(of: cover)
         do {
             for kind in ThumbnailKind.allCases {
-                try writeThumbnail(from: source, photoID: photoID, kind: kind, width: width, height: height)
+                try writeThumbnail(from: cover, photoID: photoID, kind: kind, width: width, height: height)
             }
         } catch {
             deleteFiles(relativePath: relativePath, photoID: photoID)
             throw error
         }
-        // 拆页（矢量页保持矢量、扫描页转无损图片），查看器按页浏览
-        PDFPageStore.shared.prepare(photoID: photoID, pdfData: data, progress: progress)
         return StoredImage(relativePath: relativePath, width: width, height: height, pageCount: document.pageCount)
     }
 
@@ -336,7 +340,9 @@ final class ImageStore: Sendable {
     private func rebuildThumbnail(photoID: UUID, kind: ThumbnailKind) {
         guard let fileURL = originalURL(photoID: photoID) else { return }
         let imageSource: CGImageSource? = fileURL.pathExtension.lowercased() == "pdf"
-            ? PDFDocument(url: fileURL).flatMap(Self.firstPageImageSource(of:))
+            ? PDFPageStore.shared.firstPagePreviewURL(photoID: photoID)
+                .flatMap { CGImageSourceCreateWithURL($0 as CFURL, nil) }
+                ?? PDFDocument(url: fileURL).flatMap(Self.firstPageImageSource(of:))
             : CGImageSourceCreateWithURL(fileURL as CFURL, nil)
         guard let source = imageSource, CGImageSourceGetCount(source) > 0 else {
             return
@@ -345,6 +351,21 @@ final class ImageStore: Sendable {
         // 同一张照片可能被多个格子同时请求：串行队列里排到时若已重建好就不再重复编码
         guard !FileManager.default.fileExists(atPath: thumbnailURL(photoID: photoID, kind: kind).path) else { return }
         try? writeThumbnail(from: source, photoID: photoID, kind: kind, width: width, height: height)
+    }
+
+    /// 早先导入的 PDF：缩略图改用处理后的首页重建，返回新尺寸
+    func rebuildPDFThumbnails(photoID: UUID) -> (width: Int, height: Int)? {
+        guard let url = PDFPageStore.shared.firstPagePreviewURL(photoID: photoID),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil)
+        else {
+            return nil
+        }
+        let (width, height) = Self.pixelSize(of: source)
+        for kind in ThumbnailKind.allCases {
+            try? FileManager.default.removeItem(at: thumbnailURL(photoID: photoID, kind: kind))
+            try? writeThumbnail(from: source, photoID: photoID, kind: kind, width: width, height: height)
+        }
+        return (width, height)
     }
 
     // MARK: - 编辑（裁剪）

@@ -45,6 +45,11 @@ final class PhotoCollectionCell: UICollectionViewCell {
 
     /// kind：格子尺寸对应的缩略图（最密档用 tiny，其余 small）
     func configure(photoID: UUID, kind: ThumbnailKind = .small) {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLOSE_PROBE"] == "1" {
+            print("CELL_CONFIGURE \(photoID.uuidString.prefix(4)) cached=\(ThumbnailCache.shared.cachedImage(for: photoID, kind: kind) != nil)")
+        }
+        #endif
         loadTask?.cancel()
         // 内存缓存命中时同步显示：换布局 / 快速滚动时新出现的格子不先闪灰
         if let cached = ThumbnailCache.shared.cachedImage(for: photoID, kind: kind) {

@@ -57,17 +57,38 @@ final class PDFPageStore: @unchecked Sendable {
 
     private let upgradeQueue = DispatchQueue(label: "PDFPageStore.upgrade", qos: .utility)
 
-    /// 启动后在后台把旧规则拆的 PDF 重做一遍（已是新版的跳过）
-    func upgrade(photoIDs: [UUID]) {
+    /// 启动后在后台把旧规则拆的 PDF 重做一遍（已是新版的跳过）；网格缩略图还不是用处理后的首页做的，
+    /// 重建缩略图并回调新尺寸（调用方更新 Photo 的宽高与版本号）
+    func upgrade(photoIDs: [UUID], onCoverRebuilt: @escaping @Sendable (UUID, Int, Int) -> Void) {
         upgradeQueue.async {
-            for photoID in photoIDs where !FileManager.default.fileExists(atPath: self.manifestURL(photoID: photoID).path) {
-                self.prepare(photoID: photoID)
+            for photoID in photoIDs {
                 let directory = self.directory(photoID: photoID)
-                for old in ["manifest.json", "manifest-v2.json"] {
-                    try? FileManager.default.removeItem(at: directory.appendingPathComponent(old))
+                if !FileManager.default.fileExists(atPath: self.manifestURL(photoID: photoID).path) {
+                    self.prepare(photoID: photoID)
+                    for old in ["manifest.json", "manifest-v2.json"] {
+                        try? FileManager.default.removeItem(at: directory.appendingPathComponent(old))
+                    }
                 }
+                let marker = directory.appendingPathComponent("cover-from-page1")
+                guard !FileManager.default.fileExists(atPath: marker.path),
+                      let size = ImageStore.shared.rebuildPDFThumbnails(photoID: photoID)
+                else {
+                    continue
+                }
+                FileManager.default.createFile(atPath: marker.path, contents: nil)
+                onCoverRebuilt(photoID, size.width, size.height)
             }
         }
+    }
+
+    /// 处理后的首页预览图（网格缩略图用它做，与查看器里的第 1 页是同一张图）
+    func firstPagePreviewURL(photoID: UUID) -> URL? {
+        if pages(photoID: photoID).isEmpty { return nil }
+        let url = previewURL(photoID: photoID, page: 0, kind: .large)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            makePreview(photoID: photoID, page: 0, kind: .large)
+        }
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     private func pdfURL(photoID: UUID) -> URL? {
