@@ -3,7 +3,8 @@ import UIKit
 
 /// 查看顺序「连续从上到下」：所有图片按屏宽竖排成一条、之间没有间隙（像 PDF 连续滚动）。
 /// 缩放只作用于手指下的那一张（用户要求，不是整条一起放大）：每张图自己是一个可缩放的 UIScrollView，
-/// 放大后在它原来的格子范围内平移，上下相邻的图不动；滑出屏幕后复原。
+/// 放大时整张跟着变大、不裁在原格子里（用户要求「格子也要一起放大」）—— 移到最上层盖住上下相邻的图，
+/// 超出原格子的部分也能拖动 / 捏合；滑出屏幕后复原。
 /// 只为可见范围附近的图片建视图；当前张 = 屏幕中线所在的那张
 struct ContinuousStripView: UIViewRepresentable {
     let items: [ViewerItem]
@@ -260,7 +261,7 @@ private final class StripScrollView: UIScrollView {
     }
 }
 
-/// 长条里的一张：自己可缩放（放大后在格子范围内平移）。预览图；PDF 矢量页放大后叠分块重绘层，扫描页放大后换原图
+/// 长条里的一张：自己可缩放（放大后不裁剪、盖住相邻的图，超出原格子的部分也接收触摸）。预览图；PDF 矢量页放大后叠分块重绘层，扫描页放大后换原图
 private final class StripPageView: UIScrollView, UIScrollViewDelegate {
     let imageView = UIImageView()
     var onZoomChanged: (() -> Void)?
@@ -282,6 +283,8 @@ private final class StripPageView: UIScrollView, UIScrollViewDelegate {
         alwaysBounceVertical = false
         alwaysBounceHorizontal = false
         bouncesZoom = true
+        // 放大后的图画到格子外面（盖住相邻的图）
+        clipsToBounds = false
         backgroundColor = .secondarySystemFill
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
@@ -338,8 +341,19 @@ private final class StripPageView: UIScrollView, UIScrollViewDelegate {
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        if zoomScale > 1 {
+            superview?.bringSubviewToFront(self)
+        }
         updateDetail(zoomed: zoomScale > 1.15)
         onZoomChanged?()
+    }
+
+    /// 放大后整张图的范围都算在内：手指放在盖住相邻格子的那部分上也能拖动 / 捏合
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if zoomScale > 1.01 {
+            return imageView.frame.contains(point)
+        }
+        return super.point(inside: point, with: event)
     }
 
     /// 放大后：矢量页显示分块重绘层；扫描页换原图（同比例）
