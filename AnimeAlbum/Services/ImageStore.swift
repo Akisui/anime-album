@@ -122,9 +122,10 @@ final class ImageStore: Sendable {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    func store(data: Data, photoID: UUID) throws -> StoredImage {
+    /// pdfProgress：PDF 拆页进度（已处理页数, 总页数），在当前线程回调
+    func store(data: Data, photoID: UUID, pdfProgress: (@Sendable (Int, Int) -> Void)? = nil) throws -> StoredImage {
         if Self.isPDF(data) {
-            return try storePDF(data: data, photoID: photoID)
+            return try storePDF(data: data, photoID: photoID, progress: pdfProgress)
         }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(source) > 0
@@ -154,7 +155,7 @@ final class ImageStore: Sendable {
     }
 
     /// PDF（DESIGN.md §8.3）：原文件落盘，缩略图由首页渲染（白底），之后与图片走同一套缩略图管线
-    private func storePDF(data: Data, photoID: UUID) throws -> StoredImage {
+    private func storePDF(data: Data, photoID: UUID, progress: (@Sendable (Int, Int) -> Void)?) throws -> StoredImage {
         guard let document = PDFDocument(data: data), document.pageCount > 0,
               let source = Self.firstPageImageSource(of: document)
         else {
@@ -177,7 +178,7 @@ final class ImageStore: Sendable {
             throw error
         }
         // 拆页（矢量页保持矢量、扫描页转无损图片），查看器按页浏览
-        PDFPageStore.shared.prepare(photoID: photoID, pdfData: data)
+        PDFPageStore.shared.prepare(photoID: photoID, pdfData: data, progress: progress)
         return StoredImage(relativePath: relativePath, width: width, height: height, pageCount: document.pageCount)
     }
 

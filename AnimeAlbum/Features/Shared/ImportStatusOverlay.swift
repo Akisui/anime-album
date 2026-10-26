@@ -14,16 +14,30 @@ struct ImportStatusOverlay: View {
     private var content: some View {
         if importer.isImporting {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("正在导入")
-                        .font(.footnote.weight(.semibold))
-                    Spacer()
-                    Text("\(importer.completed)/\(importer.total)")
-                        .font(.footnote)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                // PDF 拆页时显示页数进度：处理到第几页 / 共几页
+                if let document = importer.documentProgress {
+                    HStack {
+                        Text(importer.total > 1 ? "正在处理 PDF（\(importer.completed + 1)/\(importer.total)）" : "正在处理 PDF")
+                            .font(.footnote.weight(.semibold))
+                        Spacer()
+                        Text("第 \(min(document.page + 1, document.pageCount)) / \(document.pageCount) 页")
+                            .font(.footnote)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: Double(document.page), total: Double(max(document.pageCount, 1)))
+                } else {
+                    HStack {
+                        Text("正在导入")
+                            .font(.footnote.weight(.semibold))
+                        Spacer()
+                        Text("\(importer.completed)/\(importer.total)")
+                            .font(.footnote)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: Double(importer.completed), total: Double(max(importer.total, 1)))
                 }
-                ProgressView(value: Double(importer.completed), total: Double(max(importer.total, 1)))
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)

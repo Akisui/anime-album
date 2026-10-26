@@ -94,6 +94,9 @@ struct RootView: View {
         .environment(viewerPresenter)
         .environment(selectionBarPresenter)
         .task {
+            // 旧规则拆页的 PDF 在后台按新规则重做
+            let pdfs = (try? modelContext.fetch(FetchDescriptor<Photo>()))?.filter(\.isPDF).map(\.id) ?? []
+            PDFPageStore.shared.upgrade(photoIDs: pdfs)
             #if DEBUG
             DebugSeeder.applyLaunchTweaks()
             await DebugSeeder.seedIfRequested(context: modelContext)

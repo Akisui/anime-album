@@ -122,8 +122,12 @@ struct PhotoViewerOverlay: View {
     @State private var stableSafeBottom: CGFloat = 0
     /// 胶片条居中的照片（与翻页器双向同步：翻页 → 胶片条滚到当前张；拖动胶片条 → 翻页器跟着换图）
     @State private var filmstripPosition = ScrollPosition(idType: String.self)
-    /// 用户正在拖动 / 惯性滚动胶片条：此时当前张不展开（宽度变化会让滚动位置跳）
+    /// 用户正在拖动 / 惯性滚动胶片条
     @State private var isScrubbing = false
+    /// 胶片条按哪一张排版（它展开为原始比例；它所在的 PDF 以它为顶页叠放、整组两侧空出）。
+    /// 拖动胶片条期间冻结、松手停下后才换成当前张 —— 若随拖动经过的每一张实时重排，
+    /// 手指下的内容跟着移动、又换了一张，来回跳（真机实测「抽风」）
+    @State private var filmstripAnchorID: String?
     @State private var openAnimationDone = false
     @State private var readyPages: Set<String> = []
     @State private var zoomedPages: Set<String> = []
@@ -206,6 +210,8 @@ struct PhotoViewerOverlay: View {
     init(session: ViewerPresenter.Session) {
         self.session = session
         _items = State(initialValue: session.items)
+        _filmstripAnchorID = State(initialValue: session.items.indices.contains(session.initialIndex)
+            ? session.items[session.initialIndex].id : nil)
         _index = State(initialValue: session.initialIndex)
     }
 
@@ -621,24 +627,27 @@ struct PhotoViewerOverlay: View {
 
     // MARK: 胶片条
 
-    /// 当前页展开为原始比例（拖动中不展开）
-    private var expandedFilmstripID: String? {
-        isScrubbing ? nil : currentItem.id
+    private var filmstripAnchor: ViewerItem {
+        items.first { $0.id == filmstripAnchorID } ?? currentItem
     }
 
     /// 胶片条一格的排布。普通照片之间 2pt，当前张两侧各再空出 4pt。
-    /// 多页 PDF 的各页叠成一组：压在最上面的页完整露出（正在看的 PDF 是当前页，其余 PDF 是首页），
-    /// 往左、往右依次一页压一页、每页只露出一截（越远越在下面）；正在看的 PDF 整组两侧空出、与前后照片隔开
+    /// 多页 PDF 的各页叠成一组：正在看的 PDF 只有当前页完整露出、压在最上面，往左往右依次一页压一页、
+    /// 每页只露出一截（越远越在下面），整组两侧空出、与前后照片隔开；其余 PDF 以首页为顶叠放。
+    /// 不用 zIndex：LazyHStack 里 zIndex 一变，画面就停在旧排版（状态已变、不重绘，实测）。
+    /// 叠放靠绘制顺序（后画的在上）：顶页左边的页向右溢出、被后面的页盖住；顶页右边的页只裁出露在外面的
+    /// 右侧一截，左边缘画一道阴影，看起来压在左边那页下面
     private struct FilmstripSlot {
         var width: CGFloat
-        /// 在条里占的宽度（叠放的页小于 width，多出的部分压在靠近顶页的那一格下面）
+        /// 在条里占的宽度（叠放的页小于 width）
         var layoutWidth: CGFloat
-        /// 叠放的页露出哪一侧：顶页左边的露左侧、右边的露右侧
+        /// 叠放的页露出哪一侧：顶页左边的露左侧（向右溢出）、右边的露右侧（裁掉左侧）
         var alignment: Alignment
         var leading: CGFloat
         var trailing: CGFloat
         var isStackedPage: Bool
-        var zIndex: Double
+        /// 顶页右边的页：裁掉被盖住的部分
+        var clipsCoveredPart: Bool
     }
 
     private static let filmstripGap: CGFloat = 1
@@ -647,7 +656,8 @@ struct PhotoViewerOverlay: View {
     private static let filmstripStackStep: CGFloat = 9
 
     private func filmstripSlot(for item: ViewerItem) -> FilmstripSlot {
-        let expanded = item.id == expandedFilmstripID
+        let anchor = filmstripAnchor
+        let expanded = item.id == anchor.id
         let itemSize = Self.filmstripItemSize
         let width = expanded
             ? min(max(itemSize.height * item.aspectRatio, itemSize.width), itemSize.height * 1.8)
@@ -655,11 +665,11 @@ struct PhotoViewerOverlay: View {
         guard let page = item.page, item.pageCount > 1 else {
             let gap = expanded ? Self.filmstripCurrentGap : Self.filmstripGap
             return FilmstripSlot(width: width, layoutWidth: width, alignment: .leading, leading: gap, trailing: gap,
-                                 isStackedPage: false, zIndex: expanded ? 1 : 0)
+                                 isStackedPage: false, clipsCoveredPart: false)
         }
-        let isCurrentGroup = item.photoID == currentItem.photoID
-        let topPage = isCurrentGroup ? (currentItem.page ?? 0) : 0
-        let groupGap = isCurrentGroup && !isScrubbing ? Self.filmstripCurrentGap : Self.filmstripGap
+        let isCurrentGroup = item.photoID == anchor.photoID
+        let topPage = isCurrentGroup ? (anchor.page ?? 0) : 0
+        let groupGap = isCurrentGroup ? Self.filmstripCurrentGap : Self.filmstripGap
         return FilmstripSlot(
             width: width,
             layoutWidth: page == topPage ? width : Self.filmstripStackStep,
@@ -667,7 +677,7 @@ struct PhotoViewerOverlay: View {
             leading: page == 0 ? groupGap : 0,
             trailing: page == item.pageCount - 1 ? groupGap : 0,
             isStackedPage: true,
-            zIndex: -Double(abs(page - topPage)))
+            clipsCoveredPart: page > topPage)
     }
 
     private var filmstrip: some View {
@@ -678,16 +688,24 @@ struct PhotoViewerOverlay: View {
                     FilmstripThumbnail(item: item, size: CGSize(width: slot.width, height: Self.filmstripItemSize.height),
                                        showsEdge: slot.isStackedPage)
                         .frame(width: slot.layoutWidth, alignment: slot.alignment)
+                        .clipped(antialiased: false, if: slot.clipsCoveredPart)
+                        .overlay(alignment: .leading) {
+                            if slot.clipsCoveredPart {
+                                // 左边那页投在它身上的阴影
+                                LinearGradient(colors: [.black.opacity(0.3), .clear], startPoint: .leading, endPoint: .trailing)
+                                    .frame(width: 3)
+                            }
+                        }
                         .contentShape(Rectangle())
                         .onTapGesture { jumpFromFilmstrip(to: item.id) }
                         .id(item.id)
                         .padding(.leading, slot.leading)
                         .padding(.trailing, slot.trailing)
-                        .zIndex(slot.zIndex)
                 }
             }
             .scrollTargetLayout()
-            .animation(.easeOut(duration: 0.2), value: expandedFilmstripID)
+            // 排版变化（展开 / 顶页）的动画
+            .animation(.easeOut(duration: 0.25), value: filmstripAnchorID)
         }
         // 首尾两张也能滚到正中。不用 .viewAligned：它按格子左边缘对齐，展开的当前张会偏右；
         // 停下后由 onScrollPhaseChange 把当前张滚回正中
@@ -698,7 +716,7 @@ struct PhotoViewerOverlay: View {
             guard scrubbing != isScrubbing else { return }
             isScrubbing = scrubbing
             if !scrubbing {
-                // 停下后对正当前张（展开后宽度变了）
+                // 停下后才按当前张重排，并对正
                 centerFilmstrip(animated: true)
             }
         }
@@ -740,8 +758,10 @@ struct PhotoViewerOverlay: View {
         }
     }
 
+    /// 按当前张重排（展开 / PDF 顶页）并滚到正中
     private func centerFilmstrip(animated: Bool) {
         let id = currentItem.id
+        filmstripAnchorID = id
         if animated {
             withAnimation(.easeOut(duration: 0.25)) { filmstripPosition.scrollTo(id: id, anchor: .center) }
         } else {
@@ -1061,5 +1081,16 @@ enum ViewerReadingOrder: String, CaseIterable, Identifiable {
 
     var isVertical: Bool {
         self == .topToBottom || self == .continuous
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func clipped(antialiased: Bool, if condition: Bool) -> some View {
+        if condition {
+            clipped(antialiased: antialiased)
+        } else {
+            self
+        }
     }
 }

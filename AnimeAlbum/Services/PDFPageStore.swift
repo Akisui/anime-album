@@ -41,8 +41,26 @@ final class PDFPageStore: @unchecked Sendable {
         ImageStore.shared.url(forRelativePath: "pages/\(photoID.uuidString)")
     }
 
+    /// 清单带版本号：拆页规则改了就换文件名，旧 PDF 在启动后由 upgrade 在后台按新规则重做
+    /// （v2：整页都是图片的扫描页按图片覆盖区域裁掉白边、不抗锯齿；忽略隐藏 OCR 文字）
     private func manifestURL(photoID: UUID) -> URL {
+        directory(photoID: photoID).appendingPathComponent("manifest-v2.json")
+    }
+
+    private func legacyManifestURL(photoID: UUID) -> URL {
         directory(photoID: photoID).appendingPathComponent("manifest.json")
+    }
+
+    private let upgradeQueue = DispatchQueue(label: "PDFPageStore.upgrade", qos: .utility)
+
+    /// 启动后在后台把旧规则拆的 PDF 重做一遍（已是新版的跳过）
+    func upgrade(photoIDs: [UUID]) {
+        upgradeQueue.async {
+            for photoID in photoIDs where !FileManager.default.fileExists(atPath: self.manifestURL(photoID: photoID).path) {
+                self.prepare(photoID: photoID)
+                try? FileManager.default.removeItem(at: self.legacyManifestURL(photoID: photoID))
+            }
+        }
     }
 
     private func pdfURL(photoID: UUID) -> URL? {
@@ -51,9 +69,11 @@ final class PDFPageStore: @unchecked Sendable {
 
     // MARK: - 清单
 
-    /// 拆页：分析每一页、提取扫描页图片、写清单。导入时调用（失败不影响导入，打开时会再补）
+    /// 拆页：逐页分析、提取扫描页图片、生成预览图（导入时就做好，查看时只解码 —— 翻页时现场渲染会卡），
+    /// 最后写清单。progress(已处理页数, 总页数) 在当前线程回调（导入进度显示「第 x / n 页」）
     @discardableResult
-    func prepare(photoID: UUID, pdfData: Data? = nil) -> [PDFPageInfo] {
+    func prepare(photoID: UUID, pdfData: Data? = nil,
+                 progress: (@Sendable (Int, Int) -> Void)? = nil) -> [PDFPageInfo] {
         let document: CGPDFDocument?
         if let pdfData, let provider = CGDataProvider(data: pdfData as CFData) {
             document = CGPDFDocument(provider)
@@ -63,8 +83,10 @@ final class PDFPageStore: @unchecked Sendable {
         guard let document, document.numberOfPages > 0 else { return [] }
         let directory = directory(photoID: photoID)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let count = document.numberOfPages
+        progress?(0, count)
         var pages: [PDFPageInfo] = []
-        for number in 1...document.numberOfPages {
+        for number in 1...count {
             guard let page = document.page(at: number) else { continue }
             let size = Self.displaySize(of: page)
             var info = PDFPageInfo(kind: .vector, width: size.width, height: size.height)
@@ -72,6 +94,10 @@ final class PDFPageStore: @unchecked Sendable {
                 info = raster
             }
             pages.append(info)
+            for kind in [PreviewKind.large, .tiny] {
+                writePreview(photoID: photoID, index: pages.count - 1, info: info, page: page, kind: kind)
+            }
+            progress?(number, count)
         }
         if let data = try? JSONEncoder().encode(pages) {
             try? data.write(to: manifestURL(photoID: photoID), options: .atomic)
@@ -82,15 +108,10 @@ final class PDFPageStore: @unchecked Sendable {
                 documents[photoID] = document
             }
         }
-        // 导入时就把每页的预览图做好：查看时只解码，不在翻页时现场渲染（现场渲染会卡）
-        for index in pages.indices {
-            makePreview(photoID: photoID, page: index, kind: .large)
-            makePreview(photoID: photoID, page: index, kind: .tiny)
-        }
         return pages
     }
 
-    /// 页面清单（同步；内存缓存 → 磁盘 → 现场补生成）
+    /// 页面清单（同步；内存缓存 → 磁盘 → 旧版清单（后台升级中）→ 现场补生成）
     func pages(photoID: UUID) -> [PDFPageInfo] {
         if let cached = lock.withLock({ manifests[photoID] }) {
             return cached
@@ -98,6 +119,11 @@ final class PDFPageStore: @unchecked Sendable {
         if let data = try? Data(contentsOf: manifestURL(photoID: photoID)),
            let pages = try? JSONDecoder().decode([PDFPageInfo].self, from: data), !pages.isEmpty {
             lock.withLock { manifests[photoID] = pages }
+            return pages
+        }
+        // 旧版清单：先照旧显示（不缓存），等后台升级完成
+        if let data = try? Data(contentsOf: legacyManifestURL(photoID: photoID)),
+           let pages = try? JSONDecoder().decode([PDFPageInfo].self, from: data), !pages.isEmpty {
             return pages
         }
         return prepare(photoID: photoID)
@@ -162,19 +188,22 @@ final class PDFPageStore: @unchecked Sendable {
         return makePreview(photoID: photoID, page: page, kind: kind)
     }
 
-    @discardableResult
+    /// 缺预览图（早先导入的 PDF）时现场生成并补存
     private func makePreview(photoID: UUID, page index: Int, kind: PreviewKind) -> UIImage? {
         let pages = pages(photoID: photoID)
-        guard pages.indices.contains(index) else { return nil }
-        let info = pages[index]
+        guard pages.indices.contains(index), let page = cgPage(photoID: photoID, index: index) else { return nil }
+        return writePreview(photoID: photoID, index: index, info: pages[index], page: page, kind: kind)
+    }
+
+    @discardableResult
+    private func writePreview(photoID: UUID, index: Int, info: PDFPageInfo, page: CGPDFPage,
+                              kind: PreviewKind) -> UIImage? {
         let image: UIImage?
         if info.kind == .raster, let file = info.file {
             image = Self.decode(url: directory(photoID: photoID).appendingPathComponent(file), maxPixel: kind.maxPixel)
-        } else if let page = cgPage(photoID: photoID, index: index) {
+        } else {
             let size = Self.displaySize(of: page)
             image = Self.render(page: page, scale: CGFloat(kind.maxPixel) / max(size.width, size.height))
-        } else {
-            image = nil
         }
         if let data = image?.pngData() {
             try? data.write(to: previewURL(photoID: photoID, page: index, kind: kind), options: .atomic)
@@ -215,7 +244,8 @@ final class PDFPageStore: @unchecked Sendable {
     }
 
     /// 页面按显示方向（已旋转）、白底渲染；scale：每点多少像素
-    static func render(page: CGPDFPage, scale: CGFloat, interpolate: Bool = true) -> UIImage? {
+    /// antialias=false：整页都是图片时用 —— 几条图片拼成一页的扫描件，抗锯齿会在拼接处留下白色细缝
+    static func render(page: CGPDFPage, scale: CGFloat, interpolate: Bool = true, antialias: Bool = true) -> UIImage? {
         let size = displaySize(of: page)
         let pixelSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
         guard pixelSize.width >= 1, pixelSize.height >= 1 else { return nil }
@@ -228,6 +258,9 @@ final class PDFPageStore: @unchecked Sendable {
             let cgContext = context.cgContext
             if !interpolate {
                 cgContext.interpolationQuality = .none
+            }
+            if !antialias {
+                cgContext.setShouldAntialias(false)
             }
             draw(page: page, in: cgContext, size: pixelSize)
         }
@@ -257,58 +290,86 @@ final class PDFPageStore: @unchecked Sendable {
 
     // MARK: - 扫描页识别与提取
 
-    /// 整页只有一张铺满的图片、没有文字和矢量绘制 → 扫描页，提取为无损图片
+    /// 整页只有图片（一张，或几条拼成一页）、没有可见文字和矢量绘制、图片铺满页面 → 扫描页，转无损图片。
+    /// 扫描件常带隐藏的 OCR 文字层（文字渲染模式 3），不算可见文字
     private static func extractRaster(page: CGPDFPage, index: Int, into directory: URL) -> PDFPageInfo? {
         let scan = PageContentScan(page: page)
-        guard scan.paintsVector == false, scan.showsText == false, scan.images.count == 1,
-              let placed = scan.images.first
-        else {
+        guard scan.paintsVector == false, scan.showsText == false, let first = scan.images.first else {
             return nil
         }
         let box = page.getBoxRect(.cropBox)
-        let covered = placed.rect.intersection(box)
+        let union = scan.images.dropFirst().reduce(first.rect) { $0.union($1.rect) }
+        let covered = union.intersection(box)
         guard !covered.isNull, covered.width * covered.height >= box.width * box.height * 0.98 else { return nil }
-
-        let dictionary = CGPDFStreamGetDictionary(placed.stream)
-        var width: CGPDFInteger = 0
-        var height: CGPDFInteger = 0
-        guard let dictionary,
-              CGPDFDictionaryGetInteger(dictionary, "Width", &width),
-              CGPDFDictionaryGetInteger(dictionary, "Height", &height),
-              width > 0, height > 0
-        else {
-            return nil
+        if scan.images.count == 1, let passthrough = jpegPassthrough(page: page, placed: first, index: index,
+                                                                    into: directory) {
+            return passthrough
         }
-
-        // 原样取出 JPEG / JPEG 2000 字节（与 PDF 里的数据逐字节相同）：页面未旋转、图片正放、
-        // 无遮罩 / 解码数组、颜色空间是 RGB 或灰度（CMYK JPEG 在 PDF 外常被反色）
-        var format = CGPDFDataFormat.raw
-        if page.rotationAngle % 360 == 0, placed.isUpright,
-           !hasKey(dictionary, "SMask"), !hasKey(dictionary, "Mask"), !hasKey(dictionary, "Decode"),
-           isRGBOrGray(dictionary),
-           let data = CGPDFStreamCopyData(placed.stream, &format) as Data?,
-           format == .jpegEncoded || format == .JPEG2000 {
-            let file = "\(index + 1).\(format == .jpegEncoded ? "jpg" : "jp2")"
-            let url = directory.appendingPathComponent(file)
-            if (try? data.write(to: url, options: .atomic)) != nil,
-               let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 {
-                return PDFPageInfo(kind: .raster, file: file, width: Double(width), height: Double(height))
-            }
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        // 其他编码：按图片原生分辨率（图片像素宽 / 页面上的宽）渲染整页成 PNG，不插值
-        let pixelsPerPoint = CGFloat(placed.isQuarterTurned ? height : width) / max(placed.rect.width, 1)
+        // 按图片原生分辨率（多张取最密的）渲染整页成 PNG：不插值、不抗锯齿（拼接处不留缝）
+        let pixelsPerPoint = scan.images.map { placed -> CGFloat in
+            guard let size = pixelSize(of: placed.stream) else { return 1 }
+            let pixels = placed.isQuarterTurned ? size.height : size.width
+            return CGFloat(pixels) / max(placed.rect.width, 1)
+        }.max() ?? 1
         let display = displaySize(of: page)
         let longest = max(display.width, display.height) * pixelsPerPoint
         let scale = longest > 8192 ? pixelsPerPoint * 8192 / longest : pixelsPerPoint
-        guard let image = render(page: page, scale: scale, interpolate: false), let png = image.pngData() else {
-            return nil
+        guard var image = render(page: page, scale: scale, interpolate: false, antialias: false) else { return nil }
+        // 只留图片实际覆盖的区域：扫描图没铺满页面（差零点几 pt）时，露出的白色页底会成为贴边的白色细线
+        if page.rotationAngle % 360 == 0, let cgImage = image.cgImage {
+            let pixelRect = CGRect(x: (covered.minX - box.minX) * scale, y: (box.maxY - covered.maxY) * scale,
+                                   width: covered.width * scale, height: covered.height * scale)
+            let inward = CGRect(x: ceil(pixelRect.minX), y: ceil(pixelRect.minY),
+                                width: floor(pixelRect.maxX) - ceil(pixelRect.minX),
+                                height: floor(pixelRect.maxY) - ceil(pixelRect.minY))
+            if inward.width > 0, inward.height > 0, inward.size != CGSize(width: cgImage.width, height: cgImage.height),
+               let cropped = cgImage.cropping(to: inward) {
+                image = UIImage(cgImage: cropped)
+            }
         }
+        guard let png = image.pngData() else { return nil }
         let file = "\(index + 1).png"
         guard (try? png.write(to: directory.appendingPathComponent(file), options: .atomic)) != nil else { return nil }
         return PDFPageInfo(kind: .raster, file: file,
                            width: Double(image.size.width), height: Double(image.size.height))
+    }
+
+    private static func pixelSize(of stream: CGPDFStreamRef) -> (width: Int, height: Int)? {
+        guard let dictionary = CGPDFStreamGetDictionary(stream) else { return nil }
+        var width: CGPDFInteger = 0
+        var height: CGPDFInteger = 0
+        guard CGPDFDictionaryGetInteger(dictionary, "Width", &width),
+              CGPDFDictionaryGetInteger(dictionary, "Height", &height), width > 0, height > 0
+        else {
+            return nil
+        }
+        return (width, height)
+    }
+
+    /// 单张铺满的图片是 JPEG / JPEG 2000 时，原样取出字节（与 PDF 里的数据逐字节相同）
+    private static func jpegPassthrough(page: CGPDFPage, placed: PageContentScan.PlacedImage, index: Int,
+                                        into directory: URL) -> PDFPageInfo? {
+        guard let dictionary = CGPDFStreamGetDictionary(placed.stream), let size = pixelSize(of: placed.stream) else {
+            return nil
+        }
+        // 条件：页面未旋转、图片正放、无遮罩 / 解码数组、颜色空间是 RGB 或灰度（CMYK JPEG 在 PDF 外常被反色）
+        var format = CGPDFDataFormat.raw
+        guard page.rotationAngle % 360 == 0, placed.isUpright,
+              !hasKey(dictionary, "SMask"), !hasKey(dictionary, "Mask"), !hasKey(dictionary, "Decode"),
+              isRGBOrGray(dictionary),
+              let data = CGPDFStreamCopyData(placed.stream, &format) as Data?,
+              format == .jpegEncoded || format == .JPEG2000
+        else {
+            return nil
+        }
+        let file = "\(index + 1).\(format == .jpegEncoded ? "jpg" : "jp2")"
+        let url = directory.appendingPathComponent(file)
+        if (try? data.write(to: url, options: .atomic)) != nil,
+           let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 {
+            return PDFPageInfo(kind: .raster, file: file, width: Double(size.width), height: Double(size.height))
+        }
+        try? FileManager.default.removeItem(at: url)
+        return nil
     }
 
     private static func hasKey(_ dictionary: CGPDFDictionaryRef, _ key: String) -> Bool {
@@ -352,7 +413,9 @@ private final class PageContentScan {
     private(set) var showsText = false
 
     private var ctm = CGAffineTransform.identity
-    private var stack: [CGAffineTransform] = []
+    /// 文字渲染模式（Tr）：3 = 不可见（扫描件的 OCR 文字层）
+    private var textRenderMode = 0
+    private var stack: [(CGAffineTransform, Int)] = []
     private let xObjects: CGPDFDictionaryRef?
 
     init(page: CGPDFPage) {
@@ -365,11 +428,14 @@ private final class PageContentScan {
         }
         set(["q"]) { _, info in
             let scan = PageContentScan.from(info)
-            scan.stack.append(scan.ctm)
+            scan.stack.append((scan.ctm, scan.textRenderMode))
         }
         set(["Q"]) { _, info in
             let scan = PageContentScan.from(info)
-            if let last = scan.stack.popLast() { scan.ctm = last }
+            if let (ctm, mode) = scan.stack.popLast() {
+                scan.ctm = ctm
+                scan.textRenderMode = mode
+            }
         }
         set(["cm"]) { scanner, info in
             var values = [CGPDFReal](repeating: 0, count: 6)
@@ -389,8 +455,17 @@ private final class PageContentScan {
         set(["f", "F", "f*", "S", "s", "B", "B*", "b", "b*", "sh", "BI"]) { _, info in
             PageContentScan.from(info).paintsVector = true
         }
+        set(["Tr"]) { scanner, info in
+            var mode: CGPDFInteger = 0
+            if CGPDFScannerPopInteger(scanner, &mode) {
+                PageContentScan.from(info).textRenderMode = mode
+            }
+        }
         set(["Tj", "TJ", "'", "\""]) { _, info in
-            PageContentScan.from(info).showsText = true
+            let scan = PageContentScan.from(info)
+            if scan.textRenderMode != 3 {
+                scan.showsText = true
+            }
         }
         let content = CGPDFContentStreamCreateWithPage(page)
         let scanner = CGPDFScannerCreate(content, table, Unmanaged.passUnretained(self).toOpaque())

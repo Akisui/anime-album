@@ -11,6 +11,9 @@ final class PhotoImporter {
     private(set) var isImporting = false
     private(set) var completed = 0
     private(set) var total = 0
+    /// 正在拆页的 PDF：已处理页数 / 总页数（导入进度显示「第 x / n 页」）
+    private(set) var documentProgress: (page: Int, pageCount: Int)?
+    @ObservationIgnored private var processingID: UUID?
     var summary: String?
 
     /// 一次导入的结果：photos 为这批选择对应的照片（新导入的 + 图库中已有的重复项，按选择顺序、去重），
@@ -109,7 +112,16 @@ final class PhotoImporter {
                     continue
                 }
                 let photoID = UUID()
-                let stored = try await Self.storeOffMain(data: data, photoID: photoID)
+                processingID = photoID
+                let stored = try await Self.storeOffMain(data: data, photoID: photoID) { [weak self] page, count in
+                    Task { @MainActor in
+                        // 回调是异步送回来的：可能晚于这张处理完，只认正在处理的这一份
+                        guard let self, self.processingID == photoID else { return }
+                        self.documentProgress = (page, count)
+                    }
+                }
+                processingID = nil
+                documentProgress = nil
 
                 let photo = Photo()
                 photo.id = photoID
@@ -146,7 +158,9 @@ final class PhotoImporter {
         ImageStore.contentHash(of: data)
     }
 
-    private nonisolated static func storeOffMain(data: Data, photoID: UUID) async throws -> StoredImage {
-        try ImageStore.shared.store(data: data, photoID: photoID)
+    private nonisolated static func storeOffMain(
+        data: Data, photoID: UUID, pdfProgress: @escaping @Sendable (Int, Int) -> Void
+    ) async throws -> StoredImage {
+        try ImageStore.shared.store(data: data, photoID: photoID, pdfProgress: pdfProgress)
     }
 }
