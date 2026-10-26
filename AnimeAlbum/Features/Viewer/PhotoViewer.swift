@@ -80,7 +80,6 @@ struct PhotoViewerOverlay: View {
 
     @Environment(ViewerPresenter.self) private var presenter
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \Album.sortIndex) private var albums: [Album]
 
     private enum Phase {
         case opening
@@ -121,10 +120,10 @@ struct PhotoViewerOverlay: View {
     /// 底部安全区（Home 指示条）高度：胶片条在其上方，同样在打开时捕获一次
     @State private var stableSafeBottom: CGFloat = 0
     @State private var openAnimationDone = false
-    @State private var readyPages: Set<ViewerItem.ID> = []
-    @State private var zoomedPages: Set<ViewerItem.ID> = []
-    /// 每页当前显示的图片顶边（窗口坐标 Y），由 ZoomableImageView 实时上报（含缩放/平移）
-    @State private var imageTops: [ViewerItem.ID: CGFloat] = [:]
+    /// 各页的就绪 / 缩放 / 图片顶边：只在动作发生时读（交接、下拉、顶部栏隐藏方式），不影响画面 ——
+    /// 放在不触发重绘的对象里。做成 @State 的话，翻页时新页每上报一次就整个查看器重算一遍，
+    /// 每翻一页重算 2～3 次（真机 Time Profiler 实测，翻页掉帧）
+    @State private var pageStates = ViewerPageStates()
     /// 「…」菜单：待确认删除的照片、正在裁剪的照片、新建相簿
     @State private var pendingDeletion: ViewerItem?
     @State private var editingItem: ViewerItem?
@@ -136,7 +135,7 @@ struct PhotoViewerOverlay: View {
 
     /// 每页缩放状态由页面的代理回调维护（含离屏自动复位），跨页切换不丢失
     private var currentPageZoomed: Bool {
-        zoomedPages.contains(currentItem.id)
+        pageStates.zoomedPages.contains(currentItem.id)
     }
 
     /// bar 高度对齐系统 inline 导航栏（44pt），使查看器 bar 底边与缩略图页 bar 底边一致
@@ -180,7 +179,7 @@ struct PhotoViewerOverlay: View {
             return true
         }
         // 优先用实时上报的图片顶边（含缩放/平移）；未上报时退回 fit 矩形估算
-        if let top = imageTops[currentItem.id] {
+        if let top = pageStates.imageTops[currentItem.id] {
             return top < barBottomY - 1
         }
         let image = loadTransitionImage(for: currentItem)
@@ -421,16 +420,16 @@ struct PhotoViewerOverlay: View {
             onSingleTap: { setChrome(hidden: !presenter.chromeHidden, slide: imageIntrudesBar) },
             onZoomChanged: { zoomed in
                 if zoomed {
-                    zoomedPages.insert(currentItem.id)
+                    pageStates.zoomedPages.insert(currentItem.id)
                 } else {
-                    zoomedPages.remove(currentItem.id)
+                    pageStates.zoomedPages.remove(currentItem.id)
                 }
                 if zoomed, !presenter.chromeHidden {
                     setChrome(hidden: true, slide: false, duration: 0.12)
                 }
             },
             onImageReady: { id in
-                readyPages.insert(id)
+                pageStates.readyPages.insert(id)
                 finishOpenIfReady()
             }
         )
@@ -448,9 +447,9 @@ struct PhotoViewerOverlay: View {
             },
             onZoomChanged: { zoomed in
                 if zoomed {
-                    zoomedPages.insert(item.id)
+                    pageStates.zoomedPages.insert(item.id)
                 } else {
-                    zoomedPages.remove(item.id)
+                    pageStates.zoomedPages.remove(item.id)
                 }
                 // 放大浏览时进入沉浸模式（与原生一致）：快速淡出式隐藏（图片已盖住 bar，
                 // 慢慢淡出会显得拖沓）
@@ -459,11 +458,11 @@ struct PhotoViewerOverlay: View {
                 }
             },
             onImageReady: {
-                readyPages.insert(item.id)
+                pageStates.readyPages.insert(item.id)
                 finishOpenIfReady()
             },
             onImageTopChanged: { top in
-                imageTops[item.id] = top
+                pageStates.imageTops[item.id] = top
             }
         )
     }
@@ -501,70 +500,30 @@ struct PhotoViewerOverlay: View {
 
     // MARK: 「…」菜单
 
-    /// 右上角「…」：分享 / 添加到相簿 / 编辑（裁剪）/ 删除；PDF 在最上面显示当前页码
+    /// 右上角「…」（独立视图，见 ViewerMoreMenu）。动作里现取 currentItem（@State，点按时读到的是最新的），
+    /// 不能在建菜单时把照片固定下来 —— 菜单不随翻页重建
     private var moreMenu: some View {
-        Menu {
-            if let page = currentItem.page {
-                Section {
-                    Text("第 \(page + 1) / \(currentItem.pageCount) 页")
+        ViewerMoreMenu(
+            page: currentItem.page, pageCount: currentItem.pageCount, canEdit: currentItem.page == nil,
+            onShare: {
+                if let photo = photo(for: currentItem) {
+                    PhotoSharing.share([photo])
                 }
-            }
-            Section {
-                Button("分享", systemImage: "square.and.arrow.up") {
-                    if let photo = photo(for: currentItem) {
-                        PhotoSharing.share([photo])
-                    }
+            },
+            onAddTo: { album in
+                if let photo = photo(for: currentItem) {
+                    AlbumOperations.add([photo], to: album, in: modelContext)
+                    try? modelContext.save()
                 }
-                Menu("添加到相簿", systemImage: "rectangle.stack.badge.plus") {
-                    ForEach(albums) { album in
-                        Button(album.name, systemImage: "rectangle.stack") {
-                            if let photo = photo(for: currentItem) {
-                                AlbumOperations.add([photo], to: album, in: modelContext)
-                                try? modelContext.save()
-                            }
-                        }
-                    }
-                    if !albums.isEmpty {
-                        Divider()
-                    }
-                    Button("新建相簿…", systemImage: "plus") {
-                        newAlbumName = ""
-                        showingNewAlbumAlert = true
-                    }
-                }
-                // PDF 不能裁剪
-                if currentItem.page == nil {
-                    Button("编辑", systemImage: "crop") {
-                        editingItem = currentItem
-                    }
-                }
-            }
-            Section {
-                Picker(selection: $readingOrderRaw) {
-                    ForEach(ViewerReadingOrder.allCases) { order in
-                        Label(order.title, systemImage: order.systemImage).tag(order.rawValue)
-                    }
-                } label: {
-                    Label("查看顺序", systemImage: "book")
-                }
-                .pickerStyle(.menu)
-            }
-            Section {
-                Button("删除", systemImage: "trash", role: .destructive) {
-                    pendingDeletion = currentItem
-                }
-            }
-        } label: {
-            // 圆形底色 + 三个点（原生相册同款），不用 ellipsis.circle 的描边圆圈
-            Image(systemName: "ellipsis")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color(.tertiarySystemFill)))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-        }
-        .accessibilityLabel("更多")
+            },
+            onNewAlbum: {
+                newAlbumName = ""
+                showingNewAlbumAlert = true
+            },
+            onEdit: { editingItem = currentItem },
+            onDelete: { pendingDeletion = currentItem }
+        )
+        .equatable()
     }
 
     private func photo(for item: ViewerItem) -> Photo? {
@@ -629,26 +588,7 @@ struct PhotoViewerOverlay: View {
                 try? await Task.sleep(for: .seconds(1.5))
                 index = target
             }
-            // PAGER_STEP=n：每 0.6s 往后翻一页、共 n 页（模拟连续滑动翻页）；期间逐帧记录掉帧（>20ms 的帧间隔）
-            if let raw = env["PAGER_STEP"], let steps = Int(raw) {
-                let began = CACurrentMediaTime()
-                var last = began
-                var hitches: [Int] = []
-                let monitor = DebugDisplayLink { _ in
-                    let now = CACurrentMediaTime()
-                    if now - last > 0.020 { hitches.append(Int((now - last) * 1000)) }
-                    last = now
-                }
-                monitor.start()
-                defer {
-                    monitor.stop()
-                    print("PAGER_HITCHES count=\(hitches.count) total=\(hitches.reduce(0, +))ms max=\(hitches.max() ?? 0)ms over \(Int((CACurrentMediaTime() - began) * 1000))ms")
-                }
-                for _ in 0..<steps {
-                    try? await Task.sleep(for: .seconds(0.6))
-                    withAnimation { index = min(index + 1, items.count - 1) }
-                }
-            }
+            await debugPagerSteps()
             if let raw = env["FILMSTRIP_SCRUB"], let steps = Int(raw) {
                 try? await Task.sleep(for: .seconds(1.5))
                 NotificationCenter.default.post(name: .filmstripDebugScrub, object: steps)
@@ -665,6 +605,37 @@ struct PhotoViewerOverlay: View {
             }
         }
     }
+
+    #if DEBUG
+    /// PAGER_STEP=n：每 0.6s 往后翻一页、共 n 页（模拟连续翻页）；分开统计每次翻页后 0.3s 内（翻页动画中）与其余时间的掉帧
+    private func debugPagerSteps() async {
+        let env = ProcessInfo.processInfo.environment
+            if let raw = env["PAGER_STEP"], let steps = Int(raw) {
+            // 分开统计：每次翻页后 0.3s 内（翻页动画进行中）的掉帧 / 其余时间的掉帧
+            var last = CACurrentMediaTime()
+            var stepTime = 0.0
+            var during: [Int] = []
+            var other: [Int] = []
+            let monitor = DebugDisplayLink { _ in
+                let now = CACurrentMediaTime()
+                if now - last > 0.020 {
+                    let gap = Int((now - last) * 1000)
+                    if last - stepTime < 0.3 { during.append(gap) } else { other.append(gap) }
+                }
+                last = now
+            }
+            monitor.start()
+            for _ in 0..<steps {
+                try? await Task.sleep(for: .seconds(0.6))
+                stepTime = CACurrentMediaTime()
+                withAnimation { index = min(index + 1, items.count - 1) }
+            }
+            try? await Task.sleep(for: .seconds(0.6))
+            monitor.stop()
+            print("PAGER_HITCHES during-swipe count=\(during.count) total=\(during.reduce(0, +))ms max=\(during.max() ?? 0)ms | other count=\(other.count) total=\(other.reduce(0, +))ms")
+        }
+    }
+    #endif
 
     /// slide=true：位移隐藏（单击侵入时）；slide=false：纯淡出。
     /// chromeSlides / barOverImage 必须在动画外先置好，offset 与底色才会从正确起点插值。
@@ -731,7 +702,7 @@ struct PhotoViewerOverlay: View {
 
     /// 过渡动画结束 + 当前页图片就绪，两个条件都满足才把画面交给翻页器（无缝）
     private func finishOpenIfReady() {
-        guard phase == .opening, openAnimationDone, readyPages.contains(currentItem.id) else { return }
+        guard phase == .opening, openAnimationDone, pageStates.readyPages.contains(currentItem.id) else { return }
         phase = .presented
     }
 
@@ -941,3 +912,81 @@ enum ViewerReadingOrder: String, CaseIterable, Identifiable {
     }
 }
 
+
+/// 各页的就绪 / 缩放 / 图片顶边（普通类，改动不触发重绘）
+final class ViewerPageStates {
+    var readyPages: Set<ViewerItem.ID> = []
+    var zoomedPages: Set<ViewerItem.ID> = []
+    /// 每页当前显示的图片顶边（窗口坐标 Y），由 ZoomableImageView 实时上报（含缩放/平移）
+    var imageTops: [ViewerItem.ID: CGFloat] = [:]
+}
+
+/// 查看器右上角「…」：分享 / 添加到相簿 / 编辑（裁剪）/ 查看顺序 / 删除；PDF 在最上面显示当前页码。
+/// 独立视图 + Equatable：翻页时查看器 body 重算，菜单显示的内容（页码、能否编辑）没变就不重建；
+/// 相簿列表只在这里查询（放在查看器里的话每次重算都要取一遍）
+private struct ViewerMoreMenu: View, Equatable {
+    let page: Int?
+    let pageCount: Int
+    let canEdit: Bool
+    let onShare: () -> Void
+    let onAddTo: (Album) -> Void
+    let onNewAlbum: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    @Query(sort: \Album.sortIndex) private var albums: [Album]
+    @AppStorage("viewerReadingOrder") private var readingOrderRaw = ViewerReadingOrder.leftToRight.rawValue
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.page == rhs.page && lhs.pageCount == rhs.pageCount && lhs.canEdit == rhs.canEdit
+    }
+
+    var body: some View {
+        Menu {
+            if let page {
+                Section {
+                    Text("第 \(page + 1) / \(pageCount) 页")
+                }
+            }
+            Section {
+                Button("分享", systemImage: "square.and.arrow.up", action: onShare)
+                Menu("添加到相簿", systemImage: "rectangle.stack.badge.plus") {
+                    ForEach(albums) { album in
+                        Button(album.name, systemImage: "rectangle.stack") { onAddTo(album) }
+                    }
+                    if !albums.isEmpty {
+                        Divider()
+                    }
+                    Button("新建相簿…", systemImage: "plus", action: onNewAlbum)
+                }
+                // PDF 不能裁剪
+                if canEdit {
+                    Button("编辑", systemImage: "crop", action: onEdit)
+                }
+            }
+            Section {
+                Picker(selection: $readingOrderRaw) {
+                    ForEach(ViewerReadingOrder.allCases) { order in
+                        Label(order.title, systemImage: order.systemImage).tag(order.rawValue)
+                    }
+                } label: {
+                    Label("查看顺序", systemImage: "book")
+                }
+                .pickerStyle(.menu)
+            }
+            Section {
+                Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
+            }
+        } label: {
+            // 圆形底色 + 三个点（原生相册同款），不用 ellipsis.circle 的描边圆圈
+            Image(systemName: "ellipsis")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Color(.tertiarySystemFill)))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("更多")
+    }
+}

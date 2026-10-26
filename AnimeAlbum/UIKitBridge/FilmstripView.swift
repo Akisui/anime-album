@@ -82,7 +82,8 @@ struct FilmstripView: UIViewRepresentable {
                 return
             }
             guard parent.index != layout.anchorIndex, !isScrubbing else { return }
-            // 翻页器换页 / 点了某格：重排 + 对正，同一个动画
+            // 翻页器换页 / 点了某格：重排 + 对正，同一个动画（试过延到翻页动画后再重排：真机掉帧数不变，
+            // 不是胶片条造成的，反而让胶片条跟手变慢 —— 已撤回）
             reportedIndex = parent.index
             relayout(anchor: parent.index, animated: true)
         }
