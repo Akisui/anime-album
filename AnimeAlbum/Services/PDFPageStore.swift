@@ -42,13 +42,17 @@ final class PDFPageStore: @unchecked Sendable {
     }
 
     /// 清单带版本号：拆页规则改了就换文件名，旧 PDF 在启动后由 upgrade 在后台按新规则重做
-    /// （v2：整页都是图片的扫描页按图片覆盖区域裁掉白边、不抗锯齿；忽略隐藏 OCR 文字）
+    /// （v2：整页都是图片的扫描页按图片覆盖区域裁掉白边、不抗锯齿；忽略隐藏 OCR 文字。
+    /// v3：扫描页不再要求图片铺满 98%）
     private func manifestURL(photoID: UUID) -> URL {
-        directory(photoID: photoID).appendingPathComponent("manifest-v2.json")
+        directory(photoID: photoID).appendingPathComponent("manifest-v3.json")
     }
 
+    /// 旧版清单（升级前照旧显示用，取最新的一份）
     private func legacyManifestURL(photoID: UUID) -> URL {
-        directory(photoID: photoID).appendingPathComponent("manifest.json")
+        let directory = directory(photoID: photoID)
+        let v2 = directory.appendingPathComponent("manifest-v2.json")
+        return FileManager.default.fileExists(atPath: v2.path) ? v2 : directory.appendingPathComponent("manifest.json")
     }
 
     private let upgradeQueue = DispatchQueue(label: "PDFPageStore.upgrade", qos: .utility)
@@ -58,7 +62,10 @@ final class PDFPageStore: @unchecked Sendable {
         upgradeQueue.async {
             for photoID in photoIDs where !FileManager.default.fileExists(atPath: self.manifestURL(photoID: photoID).path) {
                 self.prepare(photoID: photoID)
-                try? FileManager.default.removeItem(at: self.legacyManifestURL(photoID: photoID))
+                let directory = self.directory(photoID: photoID)
+                for old in ["manifest.json", "manifest-v2.json"] {
+                    try? FileManager.default.removeItem(at: directory.appendingPathComponent(old))
+                }
             }
         }
     }
@@ -290,8 +297,10 @@ final class PDFPageStore: @unchecked Sendable {
 
     // MARK: - 扫描页识别与提取
 
-    /// 整页只有图片（一张，或几条拼成一页）、没有可见文字和矢量绘制、图片铺满页面 → 扫描页，转无损图片。
-    /// 扫描件常带隐藏的 OCR 文字层（文字渲染模式 3），不算可见文字
+    /// 整页只有图片（一张，或几条拼成一页）、没有可见文字和矢量绘制 → 扫描页，转无损图片（裁到图片覆盖区域）。
+    /// 扫描件常带隐藏的 OCR 文字层（文字渲染模式 3），不算可见文字。不要求图片铺满页面：
+    /// 「打印为 PDF」之类的输出常把图切成几条横条、左右留白边，覆盖率不到 98%（实测约 97%），
+    /// 当成矢量页渲染时抗锯齿会在横条拼接处留下白色细线（用户反馈）
     private static func extractRaster(page: CGPDFPage, index: Int, into directory: URL) -> PDFPageInfo? {
         let scan = PageContentScan(page: page)
         guard scan.paintsVector == false, scan.showsText == false, let first = scan.images.first else {
@@ -300,7 +309,7 @@ final class PDFPageStore: @unchecked Sendable {
         let box = page.getBoxRect(.cropBox)
         let union = scan.images.dropFirst().reduce(first.rect) { $0.union($1.rect) }
         let covered = union.intersection(box)
-        guard !covered.isNull, covered.width * covered.height >= box.width * box.height * 0.98 else { return nil }
+        guard !covered.isNull, covered.width * covered.height >= box.width * box.height * 0.5 else { return nil }
         if scan.images.count == 1, let passthrough = jpegPassthrough(page: page, placed: first, index: index,
                                                                     into: directory) {
             return passthrough
