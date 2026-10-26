@@ -104,6 +104,13 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
                 }
             }
         }
+        // AUTO_HOLD=n：2s 后模拟长按第 n 张并按住不动（带 ±1pt 手指抖动），逐帧打印照片显示尺寸（验证浮起 → 等菜单 → 菜单预览连续放大）
+        if let index = ProcessInfo.processInfo.environment["AUTO_HOLD"].flatMap(Int.init) {
+            Task { @MainActor [weak coordinator] in
+                try? await Task.sleep(for: .seconds(2))
+                coordinator?.debugHold(index: index)
+            }
+        }
         // AUTO_ZOOM=in/out：1.5s 后以屏幕中心为焦点换一档；AUTO_ZOOM_HOLD=0.5 停在半途 1.5s 再退回
         if let direction = ProcessInfo.processInfo.environment["AUTO_ZOOM"] {
             let hold = ProcessInfo.processInfo.environment["AUTO_ZOOM_HOLD"].flatMap(Double.init).map { CGFloat($0) }
@@ -945,15 +952,24 @@ extension ReorderablePhotoGrid.Coordinator {
             return
         }
         preLiftWork?.cancel()
-        // 稍等一下再开始（快速轻点只是打开照片，不该闪一下），在长按识别的那一刻正好完全拿起
-        let delay: TimeInterval = 0.08
+        // 能排序又有菜单（相簿）：震动后还要按住等菜单 —— 浮起与按住放大接成一条曲线，震动处不停顿
+        let continuesToHold = canReorder && hasMenu(at: indexPath)
+        // 稍等一下再开始（快速轻点只是打开照片，不该闪一下），在长按识别的那一刻正好完全拿起 ——
+        // 时长按「按下时刻 + 识别时长」现算：延迟任务常晚到一帧，固定时长会在震动时还没浮起完、被进入拖动直接设成 1.1 倍而跳一下
+        let recognizeTime = CACurrentMediaTime() + Self.liftDuration
         let work = DispatchWorkItem { [weak self, weak cell] in
             guard let self, let cell else { return }
             self.preLiftCell = cell
-            self.setLifted(true, cell: cell, duration: Self.liftDuration - delay)
+            let liftDuration = max(recognizeTime - CACurrentMediaTime(), 0.05)
+            guard continuesToHold, let photoCell = cell as? PhotoCollectionCell else {
+                self.setLifted(true, cell: cell, duration: liftDuration)
+                return
+            }
+            let curve = PressCurve(liftDuration: liftDuration)
+            photoCell.setPressLifted(true, scale: curve.finalScale, duration: curve.totalDuration, timing: PressCurve.timing)
         }
         preLiftWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
     }
 
     /// 长按失败（轻点 / 滑动滚屏）或结束复位：没拿起的照片落回
@@ -973,42 +989,53 @@ extension ReorderablePhotoGrid.Coordinator {
         let location = recognizer.location(in: collectionView)
         switch recognizer.state {
         case .began:
-            guard let indexPath = collectionView.indexPathForItem(at: reorderPressStartItem(recognizer) ?? location),
-                  let cell = collectionView.cellForItem(at: indexPath)
+            guard let indexPath = collectionView.indexPathForItem(at: reorderPressStartItem(recognizer) ?? location)
             else {
                 return
             }
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            guard canReorder else {
-                // 图库（不能排序）：震动即弹菜单
-                presentMenu(for: indexPath)
-                return
-            }
-            var press = ReorderPress(indexPath: indexPath, start: location,
-                                     grabOffset: CGPoint(x: cell.center.x - location.x, y: cell.center.y - location.y))
-            // 一震动就进入拖动：此刻照片已完全浮起（与移动中的布局属性同为 1.1 倍 + 投影，交接无跳变）
-            if collectionView.beginInteractiveMovementForItem(at: indexPath) {
-                press.isMoving = true
-                collectionView.updateInteractiveMovementTargetPosition(
-                    CGPoint(x: location.x + press.grabOffset.x, y: location.y + press.grabOffset.y))
-            }
-            reorderPress = press
-            scheduleMenu(for: indexPath)
+            beginPress(at: indexPath, location: location)
         case .changed:
-            guard let press = reorderPress, press.isMoving else { return }
-            if hypot(location.x - press.start.x, location.y - press.start.y) > 8 {
-                // 手指动了：是拖动，不再弹菜单
-                menuWork?.cancel()
-                menuWork = nil
-            }
-            collectionView.updateInteractiveMovementTargetPosition(
-                CGPoint(x: location.x + press.grabOffset.x, y: location.y + press.grabOffset.y))
-            updateReorderAutoScroll(for: location)
+            movePress(to: location)
         case .ended:
             endReorder(commit: true)
         default:
             endReorder(commit: false)
         }
+    }
+
+    /// 长按识别（震动）：能排序时立即进入拖动并开始等菜单，不能排序时直接弹菜单
+    func beginPress(at indexPath: IndexPath, location: CGPoint) {
+        guard let collectionView, let cell = collectionView.cellForItem(at: indexPath) else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        guard canReorder else {
+            // 图库（不能排序）：震动即弹菜单
+            presentMenu(for: indexPath)
+            return
+        }
+        var press = ReorderPress(indexPath: indexPath, start: location,
+                                 grabOffset: CGPoint(x: cell.center.x - location.x, y: cell.center.y - location.y))
+        // 一震动就进入拖动：此刻照片已完全浮起（与移动中的布局属性同为 1.1 倍 + 投影，交接无跳变）
+        if collectionView.beginInteractiveMovementForItem(at: indexPath) {
+            press.isMoving = true
+            collectionView.updateInteractiveMovementTargetPosition(
+                CGPoint(x: location.x + press.grabOffset.x, y: location.y + press.grabOffset.y))
+        }
+        reorderPress = press
+        // 等菜单期间照片沿浮起时排好的曲线继续缓慢放大（PressCurve），菜单预览从那里接着放大
+        scheduleMenu(for: indexPath)
+    }
+
+    func movePress(to location: CGPoint) {
+        guard let collectionView, let press = reorderPress, press.isMoving else { return }
+        if menuWork != nil, hypot(location.x - press.start.x, location.y - press.start.y) > 8 {
+            // 手指动了：是拖动，不再弹菜单；照片退回拖动时的 1.1 倍
+            menuWork?.cancel()
+            menuWork = nil
+            (preLiftCell as? PhotoCollectionCell)?.setPressScale(PhotoCollectionCell.liftedScale, duration: 0.2)
+        }
+        collectionView.updateInteractiveMovementTargetPosition(
+            CGPoint(x: location.x + press.grabOffset.x, y: location.y + press.grabOffset.y))
+        updateReorderAutoScroll(for: location)
     }
 
     /// 手势在 .began 时可能已漂移几个点：用按下时的格子
@@ -1065,18 +1092,22 @@ extension ReorderablePhotoGrid.Coordinator {
         guard !items.isEmpty else { return }
         contextMenuActive = true
         // 预览从浮起后的位置接着放大、收起时回到格子原位；菜单期间格子隐藏（照片「离开」了格子）
-        let startFrame = cell.convert(cell.bounds, to: window)
+        let photoCell = cell as? PhotoCollectionCell
+        let holding = photoCell?.displayedPressScale ?? 1
+        let liftedFrame = cell.convert(cell.bounds, to: window)
+        let startFrame = liftedFrame.insetBy(dx: liftedFrame.width * (1 - holding) / 2,
+                                             dy: liftedFrame.height * (1 - holding) / 2)
         cell.layer.removeAllAnimations()
         setLifted(false, cell: cell, duration: 0)
         let sourceFrame = cell.convert(cell.bounds, to: window)
-        cell.alpha = 0
-        let placeholder = (cell as? PhotoCollectionCell)?.currentImage
+        photoCell?.isHiddenForMenu = true
+        let placeholder = photoCell?.currentImage
         let aspectRatio = aspectRatios.indices.contains(indexPath.item) ? aspectRatios[indexPath.item] : 1
         let menu = PhotoContextMenuController(
             photoID: photoID, aspectRatio: aspectRatio, sourceFrame: sourceFrame, startFrame: startFrame,
             placeholderImage: placeholder, items: items
-        ) { [weak self, weak cell] in
-            cell?.alpha = 1
+        ) { [weak self, weak photoCell] in
+            photoCell?.isHiddenForMenu = false
             self?.contextMenuActive = false
         }
         var presenter = window.rootViewController
@@ -1133,9 +1164,74 @@ extension ReorderablePhotoGrid.Coordinator {
         reorderAutoScrollVelocity = 0
     }
 
+    #if DEBUG
+    /// AUTO_HOLD 调试：按下 → 0.3s 识别 → 按住不动（每帧 ±1pt 抖动，同真机手指）直到菜单弹出；
+    /// 逐帧打印照片在屏幕上的显示宽度（格子按 presentation 层换算，菜单出现后改量预览）
+    func debugHold(index: Int) {
+        guard let collectionView, let window = collectionView.window,
+              let cell = collectionView.cellForItem(at: IndexPath(item: index, section: 0))
+        else {
+            return
+        }
+        let center = cell.center
+        let base = cell.bounds.width
+        pressDidTouchDown(at: center)
+        let start = CACurrentMediaTime()
+        var began = false
+        var frame = 0
+        let link = DebugDisplayLink { [weak self, weak cell] link in
+            guard let self, let cell else { link.stop(); return }
+            let t = CACurrentMediaTime() - start
+            if !began, t >= Self.liftDuration {
+                began = true
+                self.beginPress(at: IndexPath(item: index, section: 0), location: center)
+            } else if began, self.reorderPress != nil {
+                frame += 1
+                self.movePress(to: CGPoint(x: center.x + (frame % 2 == 0 ? 1 : -1), y: center.y))
+            }
+            var width: CGFloat = 0
+            var midX: CGFloat = 0
+            var source = "cell"
+            if !((cell as? PhotoCollectionCell)?.isHiddenForMenu ?? false), let imageLayer = cell.contentView.subviews.first?.layer.presentation(),
+               let windowLayer = window.layer.presentation() {
+                let rect = imageLayer.convert(imageLayer.bounds, to: windowLayer)
+                width = rect.width
+                midX = rect.midX
+            } else if let menu = window.rootViewController?.presentedViewController
+                        ?? window.windowScene?.windows.first(where: \.isKeyWindow)?.rootViewController?.presentedViewController,
+                      let preview = menu.view.subviews.first(where: { $0 is UIImageView }),
+                      let layer = preview.layer.presentation() {
+                width = layer.frame.width
+                midX = layer.frame.midX
+                source = "menu"
+            }
+            print(String(format: "HOLD t=%.3f %@ scale=%.4f midX=%.1f", t, source, width / base, midX))
+            if t > 1.6 { link.stop() }
+        }
+        link.start()
+    }
+    #endif
+
     /// 浮起反馈由格子自己保存（见 PhotoCollectionCell.setPressLifted），布局刷新不会冲掉
     private func setLifted(_ lifted: Bool, cell: UICollectionViewCell, duration: TimeInterval) {
         (cell as? PhotoCollectionCell)?.setPressLifted(lifted, duration: duration)
+    }
+}
+
+/// 相簿里长按的放大节奏：按下稍等后开始浮起，长按识别（震动）时正好到 1.1 倍，继续按住则接着缓慢放大，
+/// 到弹出菜单时停住。整段是同一条减速曲线 x = 1 − (1 − u)³（u：从开始浮起到菜单弹出的时间进度）、一个动画，
+/// 震动处速度连续 —— 拆成「浮起 ease-out + 按住」两段时，震动那一下会停住再起步
+struct PressCurve {
+    /// 浮起到 1.1 倍的时长（开始浮起 → 长按识别）
+    let liftDuration: TimeInterval
+    var totalDuration: TimeInterval { liftDuration + ReorderablePhotoGrid.Coordinator.menuDelayAfterLift }
+
+    static let timing = CAMediaTimingFunction(controlPoints: 1 / 3, 1, 2 / 3, 1)
+
+    /// 终点倍数：让曲线在震动时刻正好走到 1.1 倍
+    var finalScale: CGFloat {
+        let reached = 1 - pow(1 - liftDuration / totalDuration, 3)
+        return 1 + (PhotoCollectionCell.liftedScale - 1) / CGFloat(reached)
     }
 }
 
@@ -1201,3 +1297,30 @@ final class PhotoGridContainerView: UIView {
         }
     }
 }
+
+#if DEBUG
+/// 闭包版 CADisplayLink（调试用）
+final class DebugDisplayLink: NSObject {
+    private var link: CADisplayLink?
+    private let tick: (DebugDisplayLink) -> Void
+
+    init(tick: @escaping (DebugDisplayLink) -> Void) {
+        self.tick = tick
+    }
+
+    func start() {
+        let link = CADisplayLink(target: self, selector: #selector(step))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+    }
+
+    @objc private func step() {
+        tick(self)
+    }
+}
+#endif

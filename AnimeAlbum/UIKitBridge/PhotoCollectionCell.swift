@@ -154,40 +154,75 @@ final class PhotoCollectionCell: UICollectionViewCell {
     private var isPressLifted = false
     /// 浮起到落回动画结束：期间保持置顶
     private var isElevated = false
-    private static let liftedTransform = CGAffineTransform(scaleX: 1.1, y: 1.1)
+    static let liftedScale: CGFloat = 1.1
     private static let liftedShadowOpacity: Float = 0.3
 
-    /// 浮起 / 落回：1.1 倍 + 投影，与交互式移动的布局属性（PhotoGridCompositionalLayout）一致，交接无跳变
-    func setPressLifted(_ lifted: Bool, duration: TimeInterval) {
+    /// 浮起期间的放大全部走格子 layer 的 sublayerTransform（浮起 → 按住等菜单 → 拖动时的 1.1 倍），格子自身 transform 保持不变：
+    /// 交互式移动开始时布局属性会直接设 transform、冲掉进行中的动画（震动那一帧跳一下，实测）；
+    /// 也不能缩放 contentView —— 格子布局时会把它的 frame 重设回格子大小，带缩放时 bounds 被改小、画面先缩一下再放大（实测）
+    /// 浮起：放大到 scale（相簿里一条曲线直接放大到按住结束的大小，见 PressCurve）+ 投影；落回：回到原大小
+    func setPressLifted(_ lifted: Bool, scale: CGFloat = PhotoCollectionCell.liftedScale, duration: TimeInterval,
+                        timing: CAMediaTimingFunction = CAMediaTimingFunction(name: .easeOut)) {
         isPressLifted = lifted
         if lifted {
             isElevated = true
             layer.zPosition = CGFloat(PhotoGridCompositionalLayout.liftedZIndex)
+            transform = .identity
         }
         let animated = duration > 0 && !UIAccessibility.isReduceMotionEnabled
-        setShadowOpacity(lifted ? Self.liftedShadowOpacity : 0, duration: animated ? duration : 0)
-        let transform = lifted ? Self.liftedTransform : .identity
-        let finish: (Bool) -> Void = { [weak self] _ in
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self] in
             guard let self, !self.isPressLifted else { return }
             self.isElevated = false
             self.layer.zPosition = 0
         }
-        guard animated else {
-            self.transform = transform
-            finish(true)
-            return
+        setShadowOpacity(lifted ? Self.liftedShadowOpacity : 0, duration: animated ? duration : 0, timing: timing)
+        setPressScale(lifted ? scale : 1, duration: animated ? duration : 0, timing: timing)
+        CATransaction.commit()
+    }
+
+    /// 当前显示的放大倍数（菜单预览从这个大小接着放大）
+    var displayedPressScale: CGFloat {
+        (layer.presentation() ?? layer).sublayerTransform.m11
+    }
+
+    /// 从当前显示的大小渐变到 scale（如拖动开始时从按住的大小退回 1.1 倍），投影跟着缩放
+    func setPressScale(_ scale: CGFloat, duration: TimeInterval,
+                       timing: CAMediaTimingFunction = CAMediaTimingFunction(name: .easeOut)) {
+        let target = CATransform3DMakeScale(scale, scale, 1)
+        let shadowRect = bounds.insetBy(dx: bounds.width * (1 - scale) / 2, dy: bounds.height * (1 - scale) / 2)
+        let shadowPath = UIBezierPath(rect: shadowRect).cgPath
+        let fromTransform = layer.presentation()?.sublayerTransform ?? layer.sublayerTransform
+        let fromPath = layer.presentation()?.shadowPath ?? layer.shadowPath
+        layer.removeAnimation(forKey: "pressScale")
+        layer.removeAnimation(forKey: "pressShadowPath")
+        layer.sublayerTransform = target
+        layer.shadowPath = shadowPath
+        guard duration > 0, !UIAccessibility.isReduceMotionEnabled else { return }
+        func add(_ keyPath: String, from: Any?, to: Any, key: String) {
+            let animation = CABasicAnimation(keyPath: keyPath)
+            animation.fromValue = from
+            animation.toValue = to
+            animation.duration = duration
+            animation.timingFunction = timing
+            layer.add(animation, forKey: key)
         }
-        UIView.animate(withDuration: duration, delay: 0,
-                       options: [.allowUserInteraction, .beginFromCurrentState, .curveEaseOut],
-                       animations: { self.transform = transform }, completion: finish)
+        add("sublayerTransform", from: NSValue(caTransform3D: fromTransform), to: NSValue(caTransform3D: target), key: "pressScale")
+        if let fromPath {
+            add("shadowPath", from: fromPath, to: shadowPath, key: "pressShadowPath")
+        }
+    }
+
+    /// 菜单显示期间格子隐藏（照片「离开」了格子）：布局刷新会按布局属性把 alpha 设回 1，要在 apply 里压住
+    var isHiddenForMenu = false {
+        didSet { alpha = isHiddenForMenu ? 0 : 1 }
     }
 
     /// 投影从当前显示值渐变到目标值（layer 属性不随 UIView 动画块变化，显式加动画）
-    private func setShadowOpacity(_ opacity: Float, duration: TimeInterval) {
+    private func setShadowOpacity(_ opacity: Float, duration: TimeInterval, timing: CAMediaTimingFunction) {
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOffset = CGSize(width: 0, height: 6)
         layer.shadowRadius = 12
-        layer.shadowPath = UIBezierPath(rect: bounds).cgPath
         let from = layer.presentation()?.shadowOpacity ?? layer.shadowOpacity
         layer.removeAnimation(forKey: "liftShadow")
         layer.shadowOpacity = opacity
@@ -196,18 +231,20 @@ final class PhotoCollectionCell: UICollectionViewCell {
         animation.fromValue = from
         animation.toValue = opacity
         animation.duration = duration
-        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        animation.timingFunction = timing
         layer.add(animation, forKey: "liftShadow")
     }
 
     /// 长按排序被拖起时（布局给的 zIndex 置顶）显示投影，落下恢复；手动浮起期间以浮起状态为准
     override func apply(_ layoutAttributes: UICollectionViewLayoutAttributes) {
         super.apply(layoutAttributes)
+        if isHiddenForMenu {
+            alpha = 0
+        }
         if isElevated {
+            // 放大由 sublayerTransform 负责（交互式移动的布局属性给的 1.1 倍不叠加）
             layer.zPosition = CGFloat(PhotoGridCompositionalLayout.liftedZIndex)
-            if isPressLifted, layoutAttributes.transform.isIdentity {
-                transform = Self.liftedTransform
-            }
+            transform = .identity
             return
         }
         let lifted = layoutAttributes.zIndex >= PhotoGridCompositionalLayout.liftedZIndex
@@ -228,9 +265,13 @@ final class PhotoCollectionCell: UICollectionViewCell {
         isPressLifted = false
         isElevated = false
         layer.removeAnimation(forKey: "liftShadow")
+        layer.removeAnimation(forKey: "pressScale")
+        layer.removeAnimation(forKey: "pressShadowPath")
+        layer.sublayerTransform = CATransform3DIdentity
         layer.shadowOpacity = 0
         layer.zPosition = 0
         transform = .identity
+        isHiddenForMenu = false
     }
 }
 
