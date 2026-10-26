@@ -72,7 +72,7 @@ struct FilmstripView: UIViewRepresentable {
             let old = self.parent
             self.parent = parent
             guard let collectionView, let layout else { return }
-            if old.items.map(\.id) != parent.items.map(\.id) {
+            if old.items != parent.items {
                 layout.items = parent.items
                 layout.anchorIndex = min(parent.index, parent.items.count - 1)
                 reportedIndex = parent.index
@@ -307,7 +307,7 @@ final class FilmstripLayout: UICollectionViewLayout {
 private final class FilmstripCell: UICollectionViewCell {
     private let imageView = UIImageView()
     private var loadTask: Task<Void, Never>?
-    private var itemID: String?
+    private var itemID: ViewerItem.ID?
 
     override init(frame: CGRect) {
         super.init(frame: frame)

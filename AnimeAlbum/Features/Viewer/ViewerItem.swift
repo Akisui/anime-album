@@ -15,8 +15,16 @@ struct ViewerItem: Identifiable, Hashable {
     /// 编辑（裁剪）次数：变了就是新的一页，查看器重新加载
     let revision: Int
 
-    var id: String {
-        "\(photoID.uuidString)#\(page ?? -1)#\(revision)"
+    /// 轻量标识（不要拼字符串）：翻页器 / 胶片条每次刷新都要把所有页的 id 算一遍并比较，
+    /// 拼字符串在几千张的图库里每次刷新多花几毫秒，翻页时一卡一卡（实测）
+    struct ID: Hashable {
+        let photoID: UUID
+        let page: Int
+        let revision: Int
+    }
+
+    var id: ID {
+        ID(photoID: photoID, page: page ?? -1, revision: revision)
     }
 
     /// PDF 页按顺序展开；图片一张一项

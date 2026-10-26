@@ -15,8 +15,10 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
     var contextMenu: (UUID) -> [GridMenuItem] = { _ in [] }
     /// 供查看器查询单元当前全局 frame（自绘 zoom 过渡的起点/落点）
     var frameBox: GridFrameBox?
-    /// 正在查看器中的照片：其单元渲染为空白，关闭动画结束后恢复
-    var hiddenPhotoID: UUID?
+    /// 查看器：正在查看的照片其单元渲染为空白，关闭动画结束后恢复。
+    /// 由网格自己观察 hiddenPhotoID，不经外层视图的 body —— 外层读它的话，查看器每翻一页
+    /// 图库 / 相簿整页都要重算一遍（@Query 把全部照片重新取一遍），几千张时翻页一卡一卡（采样实测）
+    var viewerPresenter: ViewerPresenter?
     /// 选择模式：点按切换选中（不打开查看器），横向起手滑动连选
     var isSelecting = false
     var selectedIDs: Binding<Set<UUID>> = .constant([])
@@ -136,7 +138,7 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
     func updateUIView(_ container: PhotoGridContainerView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.update(photos: photos)
-        context.coordinator.updateHiddenPhoto(hiddenPhotoID)
+        context.coordinator.observeHiddenPhoto(of: viewerPresenter)
         context.coordinator.updateSelectionMode()
     }
 
@@ -344,6 +346,24 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
         }
 
         private var hiddenPhotoID: UUID?
+        private weak var observedPresenter: ViewerPresenter?
+
+        /// 跟踪 presenter.hiddenPhotoID：变化时只更新那两个格子
+        func observeHiddenPhoto(of presenter: ViewerPresenter?) {
+            guard let presenter, presenter !== observedPresenter else { return }
+            observedPresenter = presenter
+            trackHiddenPhoto()
+        }
+
+        private func trackHiddenPhoto() {
+            guard let presenter = observedPresenter else { return }
+            let id = withObservationTracking {
+                presenter.hiddenPhotoID
+            } onChange: { [weak self] in
+                DispatchQueue.main.async { self?.trackHiddenPhoto() }
+            }
+            updateHiddenPhoto(id)
+        }
 
         func updateHiddenPhoto(_ id: UUID?) {
             guard id != hiddenPhotoID else { return }

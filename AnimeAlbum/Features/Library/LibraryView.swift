@@ -130,7 +130,7 @@ struct LibraryView: View {
                 contextMenu: { cellContextMenu(for: $0) },
                 frameBox: frameBox,
                 // 照片在查看器中时格子留空，关闭动画结束才恢复（原生同款逻辑）
-                hiddenPhotoID: viewerPresenter.hiddenPhotoID,
+                viewerPresenter: viewerPresenter,
                 isSelecting: isSelecting,
                 selectedIDs: $selectedIDs,
                 allowsReordering: false,

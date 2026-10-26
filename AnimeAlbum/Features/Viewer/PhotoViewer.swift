@@ -103,7 +103,7 @@ struct PhotoViewerOverlay: View {
     /// 从 bar 底下滑出/缩回（原生同款），而不是瞬间穿透显示到 bar 之上
     @State private var maskRect: CGRect = .zero
     @State private var dragFitRect: CGRect = .zero
-    @State private var draggingItemID: String?
+    @State private var draggingItemID: ViewerItem.ID?
     /// 拖拽开始到关闭结束期间压住查看器 bar：避免松手瞬间 bar 跟随 backdropOpacity
     /// 突然闪现在缩略图页的 bar 上（两者高度还不一致）
     @State private var chromeSuppressed = false
@@ -121,10 +121,10 @@ struct PhotoViewerOverlay: View {
     /// 底部安全区（Home 指示条）高度：胶片条在其上方，同样在打开时捕获一次
     @State private var stableSafeBottom: CGFloat = 0
     @State private var openAnimationDone = false
-    @State private var readyPages: Set<String> = []
-    @State private var zoomedPages: Set<String> = []
+    @State private var readyPages: Set<ViewerItem.ID> = []
+    @State private var zoomedPages: Set<ViewerItem.ID> = []
     /// 每页当前显示的图片顶边（窗口坐标 Y），由 ZoomableImageView 实时上报（含缩放/平移）
-    @State private var imageTops: [String: CGFloat] = [:]
+    @State private var imageTops: [ViewerItem.ID: CGFloat] = [:]
     /// 「…」菜单：待确认删除的照片、正在裁剪的照片、新建相簿
     @State private var pendingDeletion: ViewerItem?
     @State private var editingItem: ViewerItem?
@@ -370,8 +370,7 @@ struct PhotoViewerOverlay: View {
                 continuousPager
             }
         }
-        .onChange(of: index, initial: true) {
-            preloadNeighbours()
+        .onChange(of: index) {
             // 拖拽接管时 TabView 的翻页手势被取消，可能瞬时抖动 index 再弹回，
             // 只在正常浏览状态下联动空白格子，避免邻居缩略图闪空白
             guard phase == .presented else { return }
@@ -379,15 +378,6 @@ struct PhotoViewerOverlay: View {
         }
     }
 
-    /// 预先把前后两张的大图读进内存：翻页时旁边那页一露边就能同步显示（见 ZoomableImageView.loadImage）
-    private func preloadNeighbours() {
-        for offset in [-2, -1, 1, 2] where items.indices.contains(index + offset) {
-            let item = items[index + offset]
-            if item.cachedImage(.large) == nil {
-                Task { _ = await item.image(.large) }
-            }
-        }
-    }
 
     /// 从左到右：系统分页
     private var horizontalPager: some View {
@@ -639,8 +629,21 @@ struct PhotoViewerOverlay: View {
                 try? await Task.sleep(for: .seconds(1.5))
                 index = target
             }
-            // PAGER_STEP=n：每 0.6s 往后翻一页、共 n 页（模拟连续滑动翻页）
+            // PAGER_STEP=n：每 0.6s 往后翻一页、共 n 页（模拟连续滑动翻页）；期间逐帧记录掉帧（>20ms 的帧间隔）
             if let raw = env["PAGER_STEP"], let steps = Int(raw) {
+                let began = CACurrentMediaTime()
+                var last = began
+                var hitches: [Int] = []
+                let monitor = DebugDisplayLink { _ in
+                    let now = CACurrentMediaTime()
+                    if now - last > 0.020 { hitches.append(Int((now - last) * 1000)) }
+                    last = now
+                }
+                monitor.start()
+                defer {
+                    monitor.stop()
+                    print("PAGER_HITCHES count=\(hitches.count) total=\(hitches.reduce(0, +))ms max=\(hitches.max() ?? 0)ms over \(Int((CACurrentMediaTime() - began) * 1000))ms")
+                }
                 for _ in 0..<steps {
                     try? await Task.sleep(for: .seconds(0.6))
                     withAnimation { index = min(index + 1, items.count - 1) }

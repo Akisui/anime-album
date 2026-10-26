@@ -64,7 +64,7 @@ struct AlbumDetailView: View {
                     },
                     contextMenu: { cellContextMenu(for: $0) },
                     frameBox: frameBox,
-                    hiddenPhotoID: viewerPresenter.hiddenPhotoID,
+                    viewerPresenter: viewerPresenter,
                     isSelecting: isSelecting,
                     selectedIDs: $selectedIDs
                 )

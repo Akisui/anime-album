@@ -13,7 +13,7 @@ struct ContinuousStripView: UIViewRepresentable {
     var onSingleTap: () -> Void
     var onZoomChanged: (Bool) -> Void
     /// 当前张图片就绪（打开过渡据此让位）
-    var onImageReady: (String) -> Void
+    var onImageReady: (ViewerItem.ID) -> Void
 
     // MARK: 布局（查看器的打开过渡也按这里算落点，两边必须一致）
 
@@ -88,7 +88,7 @@ struct ContinuousStripView: UIViewRepresentable {
 
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
         let coordinator = context.coordinator
-        let itemsChanged = coordinator.parent.items.map(\.id) != items.map(\.id)
+        let itemsChanged = coordinator.parent.items != items
         coordinator.parent = self
         if itemsChanged {
             coordinator.reloadItems()
@@ -198,7 +198,7 @@ struct ContinuousStripView: UIViewRepresentable {
                 ?? (midY < 0 ? 0 : frames.count - 1)
         }
 
-        func windowFrame(ofItemID id: String) -> CGRect? {
+        func windowFrame(ofItemID id: ViewerItem.ID) -> CGRect? {
             guard let index = parent.items.firstIndex(where: { $0.id == id }), let view = pageViews[index],
                   view.window != nil
             else {
@@ -249,7 +249,7 @@ struct ContinuousStripView: UIViewRepresentable {
 
 /// 打开 / 关闭过渡向连续长条查询某张图当前在屏幕上的位置
 final class ContinuousStripBox {
-    var frameOfItem: ((String) -> CGRect?)?
+    var frameOfItem: ((ViewerItem.ID) -> CGRect?)?
 }
 
 private final class StripScrollView: UIScrollView {
