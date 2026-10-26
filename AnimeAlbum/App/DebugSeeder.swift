@@ -69,6 +69,13 @@ enum DebugSeeder {
             AlbumOperations.add(Array(photos.prefix(6)), to: album, in: context)
         }
 
+        // ALBUM_FILL=1：把图库里所有照片加进第一个相簿（造大相簿，复现首次进入卡顿）
+        if ProcessInfo.processInfo.environment["ALBUM_FILL"] == "1",
+           let album = (try? context.fetch(FetchDescriptor<Album>(sortBy: [SortDescriptor(\.sortIndex)])))?.first {
+            let photos = (try? context.fetch(FetchDescriptor<Photo>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+            AlbumOperations.add(photos, to: album, in: context)
+        }
+
         try? context.save()
     }
 

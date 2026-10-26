@@ -12,7 +12,7 @@ struct AlbumPhotoPickerSheet: View {
     @State private var selectedIDs: Set<UUID> = []
 
     private var candidates: [Photo] {
-        let existing = Set(album.sortedPhotos.map(\.id))
+        let existing = Set((album.entries ?? []).compactMap { $0.photo?.id })
         return allPhotos.filter { !existing.contains($0.id) }
     }
 

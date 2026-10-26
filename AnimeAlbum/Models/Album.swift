@@ -17,19 +17,23 @@ final class Album {
 }
 
 extension Album {
+    /// 按 sortIndex 排序。先一次性读出排序值再排：直接在比较里读 entry.sortIndex 的话，每次比较都要经 SwiftData
+    /// 取两次属性，1500 张的相簿排一次 100ms+（采样实测）
     var sortedEntries: [AlbumEntry] {
-        (entries ?? []).sorted { $0.sortIndex < $1.sortIndex }
+        (entries ?? []).map { ($0.sortIndex, $0) }.sorted { $0.0 < $1.0 }.map(\.1)
     }
 
     var sortedPhotos: [Photo] {
         sortedEntries.compactMap(\.photo)
     }
 
+    /// 封面：指定的那张，否则排第一的那张（只扫一遍找最小，不整体排序 —— 相簿列表每张卡片都要取）
     var coverPhoto: Photo? {
-        if let coverPhotoID, let match = sortedPhotos.first(where: { $0.id == coverPhotoID }) {
+        let entries = entries ?? []
+        if let coverPhotoID, let match = entries.lazy.compactMap(\.photo).first(where: { $0.id == coverPhotoID }) {
             return match
         }
-        return sortedPhotos.first
+        return entries.map { ($0.sortIndex, $0) }.min { $0.0 < $1.0 }?.1.photo
     }
 
     var photoCount: Int {

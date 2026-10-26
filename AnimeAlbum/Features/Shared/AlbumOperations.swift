@@ -24,8 +24,9 @@ enum AlbumOperations {
     /// 追加到相簿末尾（已在相簿里的跳过），返回实际新加入的张数
     @discardableResult
     static func add(_ photos: [Photo], to album: Album, in context: ModelContext) -> Int {
-        var existingIDs = Set(album.sortedPhotos.map(\.id))
-        var index = album.sortedEntries.last?.sortIndex ?? 0
+        let entries = album.entries ?? []
+        var existingIDs = Set(entries.compactMap { $0.photo?.id })
+        var index = entries.map(\.sortIndex).max() ?? 0
         var added = 0
         for photo in photos where existingIDs.insert(photo.id).inserted {
             added += 1

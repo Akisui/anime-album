@@ -8,6 +8,8 @@ struct AlbumDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ViewerPresenter.self) private var viewerPresenter
     @Environment(SelectionBarPresenter.self) private var selectionBarPresenter
+    /// RootView 启动后在屏幕外预搭的那一份：不跑任何任务（调试的自动导入等会执行两遍）
+    @Environment(\.isPrewarmCopy) private var isPrewarmCopy
     @State private var showingPicker = false
     // 相簿里直接导入（系统相册 / 文件）：先进图库（按内容哈希去重），再加入本相簿
     @State private var importer = PhotoImporter()
@@ -23,8 +25,27 @@ struct AlbumDetailView: View {
     @State private var showingNewAlbumAlert = false
     @State private var newAlbumName = ""
 
+    /// 相簿里的照片：数据库按 sortIndex 排好序取出、顺带预取照片（不在内存里逐条比较排序 ——
+    /// 1500 张的相簿每次刷新 110～230ms，第一次进相簿时刷新好几次，推入动画被吃掉，采样实测）
+    @Query private var entries: [AlbumEntry]
+
+    init(album: Album) {
+        self.album = album
+        let albumID = album.id
+        var descriptor = FetchDescriptor<AlbumEntry>(
+            predicate: #Predicate { $0.album?.id == albumID },
+            sortBy: [SortDescriptor(\.sortIndex)])
+        descriptor.relationshipKeyPathsForPrefetching = [\.photo]
+        _entries = Query(descriptor)
+    }
+
+    /// 推入时先不取数据：SwiftUI 推入前会同步算一遍目标页，大相簿的查询（1500 张约 120ms）全压在推入动画开始前，
+    /// 刚启动时第一次进相簿推入动画被吃掉（用户反馈）。页面出现后的下一轮再取 —— 推入动画由渲染进程驱动，
+    /// 主线程忙也照样走，照片在滑入途中出现
+    @State private var showsContent = false
+
     private var photos: [Photo] {
-        album.sortedPhotos
+        showsContent ? entries.compactMap(\.photo) : []
     }
 
     private var selectedPhotos: [Photo] {
@@ -33,7 +54,9 @@ struct AlbumDetailView: View {
 
     var body: some View {
         Group {
-            if photos.isEmpty {
+            if !showsContent {
+                Color(.systemBackground)
+            } else if photos.isEmpty {
                 ContentUnavailableView {
                     Label("相簿是空的", systemImage: "photo.on.rectangle.angled")
                 } description: {
@@ -75,6 +98,10 @@ struct AlbumDetailView: View {
         // 选择中不能返回（底部栏属于这一页），与原生一致：先「取消」再离开
         .navigationBarBackButtonHidden(isSelecting)
         .toolbar { toolbarContent }
+        .onAppear {
+            guard !showsContent else { return }
+            DispatchQueue.main.async { showsContent = true }
+        }
         .onChange(of: selectedIDs) {
             selectionBarPresenter.update(photos: selectedPhotos)
         }
@@ -130,6 +157,7 @@ struct AlbumDetailView: View {
             Text("为此相簿输入一个名称。")
         }
         .task {
+            guard !isPrewarmCopy else { return }
             #if DEBUG
             let env = ProcessInfo.processInfo.environment
             // 调试辅助：OPEN_PICKER=1 进入相簿后自动弹出「添加照片」选择器

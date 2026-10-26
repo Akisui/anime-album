@@ -135,6 +135,11 @@ struct RootView: View {
         if env["SIDEBAR_ALBUM"] == "1", let first = albums.first {
             selectedTab = .album(first.id)
         }
+        // SWITCH_TO_ALBUMS=秒：从图库启动，等这么久后切到相簿页（模拟手动切 Tab；配合 TAP_ALBUM 复现首次进相簿）
+        if let raw = env["SWITCH_TO_ALBUMS"], let delay = Double(raw) {
+            try? await Task.sleep(for: .seconds(delay))
+            selectedTab = .albums
+        }
         if env["AUTO_NEW_ALBUM"] == "1" {
             try? await Task.sleep(for: .seconds(1.5))
             commandCenter.newAlbumRequested = true
@@ -151,6 +156,7 @@ struct RootView: View {
             NavigationStack {
                 AlbumDetailView(album: prewarmAlbum)
             }
+            .environment(\.isPrewarmCopy, true)
             .frame(width: 390, height: 700)
             .opacity(0)
             .allowsHitTesting(false)
@@ -168,4 +174,9 @@ struct RootView: View {
                 commandCenter.newAlbumRequested = presented
             })
     }
+}
+
+extension EnvironmentValues {
+    /// 屏幕外预搭的页面（见 RootView.albumPagePrewarm）：只为提前搭好视图，不该产生任何副作用
+    @Entry var isPrewarmCopy = false
 }
