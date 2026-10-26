@@ -90,6 +90,16 @@ struct ZoomableImageView: UIViewRepresentable {
         }
 
         func loadImage(item: ViewerItem) {
+            // 先同步放上内存里已有的图（大图 / 小图 / 胶片条的小图，同比例）：页面一露出来就有画面。
+            // 只异步加载的话，翻页时旁边那页刚露边的几帧是空的、闪白（录屏实测）
+            if let cached = item.cachedImage(.large) ?? item.cachedImage(.small) ?? item.cachedImage(.tiny) {
+                imageView?.image = cached
+                layoutImage()
+                if cached.size == item.cachedImage(.large)?.size {
+                    loadTask = Task { [weak self] in self?.parent.onImageReady?() }
+                    return
+                }
+            }
             loadTask = Task { [weak self] in
                 let image = await item.image(.large)
                 guard let self, !Task.isCancelled else { return }

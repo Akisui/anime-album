@@ -1,7 +1,9 @@
 import SwiftUI
 import UIKit
 
-/// 查看顺序「连续从上到下」：所有图片按屏宽竖排成一条、之间没有间隙（像 PDF 连续滚动），整条一起缩放。
+/// 查看顺序「连续从上到下」：所有图片按屏宽竖排成一条、之间没有间隙（像 PDF 连续滚动）。
+/// 缩放只作用于手指下的那一张（用户要求，不是整条一起放大）：每张图自己是一个可缩放的 UIScrollView，
+/// 放大后在它原来的格子范围内平移，上下相邻的图不动；滑出屏幕后复原。
 /// 只为可见范围附近的图片建视图；当前张 = 屏幕中线所在的那张
 struct ContinuousStripView: UIViewRepresentable {
     let items: [ViewerItem]
@@ -56,8 +58,6 @@ struct ContinuousStripView: UIViewRepresentable {
         let coordinator = context.coordinator
         let scrollView = StripScrollView()
         scrollView.delegate = coordinator
-        scrollView.minimumZoomScale = 1
-        scrollView.maximumZoomScale = 4
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.contentInsetAdjustmentBehavior = .never
         scrollView.backgroundColor = .clear
@@ -73,6 +73,15 @@ struct ContinuousStripView: UIViewRepresentable {
         scrollView.addGestureRecognizer(singleTap)
 
         box.frameOfItem = { [weak coordinator] id in coordinator?.windowFrame(ofItemID: id) }
+        #if DEBUG
+        // CONT_ZOOM=1：2s 后对当前张做一次双击放大（只该放大这一张）
+        if ProcessInfo.processInfo.environment["CONT_ZOOM"] == "1" {
+            Task { @MainActor [weak coordinator] in
+                try? await Task.sleep(for: .seconds(2))
+                coordinator?.debugZoomCurrent()
+            }
+        }
+        #endif
         return scrollView
     }
 
@@ -130,8 +139,6 @@ struct ContinuousStripView: UIViewRepresentable {
 
         private func rebuildLayout() {
             guard let scrollView else { return }
-            // 宽度变了（转屏 / 分屏）或换了内容：回到不缩放再排
-            scrollView.zoomScale = 1
             frames = ContinuousStripView.frames(of: parent.items, width: scrollView.bounds.width)
             let height = frames.last?.maxY ?? 0
             contentView.frame = CGRect(x: 0, y: 0, width: scrollView.bounds.width, height: height)
@@ -148,9 +155,6 @@ struct ContinuousStripView: UIViewRepresentable {
         func scroll(to index: Int, animated: Bool) {
             guard let scrollView, frames.indices.contains(index) else { return }
             reportedIndex = index
-            if scrollView.zoomScale > 1 {
-                scrollView.setZoomScale(1, animated: false)
-            }
             let y = ContinuousStripView.offsetY(toShow: index, frames: frames, viewport: viewport)
             scrollView.setContentOffset(CGPoint(x: 0, y: y), animated: animated)
             updateVisiblePages()
@@ -165,6 +169,10 @@ struct ContinuousStripView: UIViewRepresentable {
                 view.removeFromSuperview()
                 pageViews[index] = nil
             }
+            // 放大过的图完全滑出屏幕后复原
+            for (index, view) in pageViews where view.zoomScale > 1 && !frames[index].intersects(visible) {
+                view.setZoomScale(1, animated: false)
+            }
             for (index, frame) in frames.enumerated() where frame.intersects(range) && pageViews[index] == nil {
                 let item = parent.items[index]
                 let view = StripPageView(item: item) { [weak self] in
@@ -173,8 +181,8 @@ struct ContinuousStripView: UIViewRepresentable {
                         self.parent.onImageReady(item.id)
                     }
                 }
+                view.onZoomChanged = { [weak self] in self?.reportZoom() }
                 view.frame = frame
-                view.setZoomed(scrollView.zoomScale > 1.15)
                 contentView.addSubview(view)
                 pageViews[index] = view
             }
@@ -204,38 +212,30 @@ struct ContinuousStripView: UIViewRepresentable {
             parent.onSingleTap()
         }
 
+        /// 双击：只放大 / 复原点到的那一张
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
-            guard let scrollView else { return }
-            if scrollView.zoomScale > 1 {
-                scrollView.setZoomScale(1, animated: true)
-            } else {
-                let point = recognizer.location(in: contentView)
-                let scale: CGFloat = 2.5
-                let size = CGSize(width: scrollView.bounds.width / scale, height: scrollView.bounds.height / scale)
-                scrollView.zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
-                                           width: size.width, height: size.height), animated: true)
-            }
+            let point = recognizer.location(in: contentView)
+            guard let view = pageViews.values.first(where: { $0.frame.contains(point) }) else { return }
+            view.toggleZoom(at: recognizer.location(in: view.imageView))
+        }
+
+        #if DEBUG
+        func debugZoomCurrent() {
+            guard let view = pageViews[parent.index] else { return }
+            view.toggleZoom(at: CGPoint(x: view.bounds.midX, y: view.bounds.midY))
+        }
+        #endif
+
+        private func reportZoom() {
+            parent.onZoomChanged(pageViews.values.contains { $0.zoomScale > 1.02 })
         }
 
         // MARK: UIScrollViewDelegate
 
-        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            contentView
-        }
-
-        func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            let zoomed = scrollView.zoomScale > 1.15
-            for view in pageViews.values {
-                view.setZoomed(zoomed)
-            }
-            parent.onZoomChanged(scrollView.zoomScale > 1.02)
-            updateVisiblePages()
-        }
-
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             updateVisiblePages()
             // 只有用户滚动才改页码；程序滚动（点胶片条跳页）途经的各张不算
-            guard scrollView.isTracking || scrollView.isDecelerating || scrollView.isZooming,
+            guard scrollView.isTracking || scrollView.isDecelerating,
                   let index = centeredIndex(), index != reportedIndex
             else {
                 return
@@ -260,8 +260,10 @@ private final class StripScrollView: UIScrollView {
     }
 }
 
-/// 长条里的一张：预览图；PDF 矢量页放大后叠分块重绘层，扫描页放大后换原图
-private final class StripPageView: UIImageView {
+/// 长条里的一张：自己可缩放（放大后在格子范围内平移）。预览图；PDF 矢量页放大后叠分块重绘层，扫描页放大后换原图
+private final class StripPageView: UIScrollView, UIScrollViewDelegate {
+    let imageView = UIImageView()
+    var onZoomChanged: (() -> Void)?
     private let item: ViewerItem
     private var tiledView: UIView?
     private var fullImageRequested = false
@@ -270,22 +272,33 @@ private final class StripPageView: UIImageView {
     init(item: ViewerItem, onReady: @escaping () -> Void) {
         self.item = item
         super.init(frame: .zero)
-        contentMode = .scaleAspectFill
-        clipsToBounds = true
+        delegate = self
+        minimumZoomScale = 1
+        maximumZoomScale = 4
+        showsVerticalScrollIndicator = false
+        showsHorizontalScrollIndicator = false
+        contentInsetAdjustmentBehavior = .never
+        // 不放大时不拦竖向滑动，交给外层长条
+        alwaysBounceVertical = false
+        alwaysBounceHorizontal = false
+        bouncesZoom = true
         backgroundColor = .secondarySystemFill
-        image = item.cachedImage(.large) ?? item.cachedImage(.small) ?? item.cachedImage(.tiny)
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.image = item.cachedImage(.large) ?? item.cachedImage(.small) ?? item.cachedImage(.tiny)
+        addSubview(imageView)
         if item.isVectorPage, let page = item.page {
             let tiled = PDFTiledPageView(photoID: item.photoID, page: page)
             tiled.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             tiled.isHidden = true
-            addSubview(tiled)
+            imageView.addSubview(tiled)
             tiledView = tiled
         }
         loadTask = Task { [weak self] in
             let image = await item.image(.large)
             guard let self, !Task.isCancelled else { return }
             if let image {
-                self.image = image
+                self.imageView.image = image
                 self.backgroundColor = .clear
             }
             onReady()
@@ -299,12 +312,38 @@ private final class StripPageView: UIImageView {
         loadTask?.cancel()
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        tiledView?.frame = bounds
+    override var frame: CGRect {
+        didSet {
+            guard frame.size != oldValue.size else { return }
+            zoomScale = 1
+            imageView.frame = CGRect(origin: .zero, size: frame.size)
+            tiledView?.frame = imageView.bounds
+            contentSize = frame.size
+        }
     }
 
-    func setZoomed(_ zoomed: Bool) {
+    func toggleZoom(at point: CGPoint) {
+        if zoomScale > 1 {
+            setZoomScale(1, animated: true)
+        } else {
+            let scale: CGFloat = 2.5
+            let size = CGSize(width: bounds.width / scale, height: bounds.height / scale)
+            zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
+                            width: size.width, height: size.height), animated: true)
+        }
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        imageView
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        updateDetail(zoomed: zoomScale > 1.15)
+        onZoomChanged?()
+    }
+
+    /// 放大后：矢量页显示分块重绘层；扫描页换原图（同比例）
+    private func updateDetail(zoomed: Bool) {
         if let tiledView, tiledView.isHidden == zoomed {
             tiledView.isHidden = !zoomed
         }
@@ -313,7 +352,7 @@ private final class StripPageView: UIImageView {
         let item = item
         Task { [weak self] in
             guard let image = await PDFPageStore.shared.fullImage(photoID: item.photoID, page: page) else { return }
-            self?.image = image
+            self?.imageView.image = image
         }
     }
 }

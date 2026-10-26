@@ -362,7 +362,7 @@ struct PhotoViewerOverlay: View {
     private var pager: some View {
         Group {
             switch readingOrder {
-            case .leftToRight, .rightToLeft:
+            case .leftToRight:
                 horizontalPager
             case .topToBottom:
                 verticalPager
@@ -370,7 +370,8 @@ struct PhotoViewerOverlay: View {
                 continuousPager
             }
         }
-        .onChange(of: index) {
+        .onChange(of: index, initial: true) {
+            preloadNeighbours()
             // 拖拽接管时 TabView 的翻页手势被取消，可能瞬时抖动 index 再弹回，
             // 只在正常浏览状态下联动空白格子，避免邻居缩略图闪空白
             guard phase == .presented else { return }
@@ -378,13 +379,21 @@ struct PhotoViewerOverlay: View {
         }
     }
 
-    /// 从左到右 / 从右到左：系统分页（从右到左 = 整个分页容器按右到左排，下一张在左边）
+    /// 预先把前后两张的大图读进内存：翻页时旁边那页一露边就能同步显示（见 ZoomableImageView.loadImage）
+    private func preloadNeighbours() {
+        for offset in [-2, -1, 1, 2] where items.indices.contains(index + offset) {
+            let item = items[index + offset]
+            if item.cachedImage(.large) == nil {
+                Task { _ = await item.image(.large) }
+            }
+        }
+    }
+
+    /// 从左到右：系统分页
     private var horizontalPager: some View {
         TabView(selection: $index) {
             ForEach(Array(items.enumerated()), id: \.element.id) { offset, item in
                 zoomablePage(item, at: offset)
-                    // 页内内容不跟着镜像
-                    .environment(\.layoutDirection, .leftToRight)
                     // TabView 的分页容器会给每一页重新注入安全区，页内也必须显式忽略，
                     // 否则页内 fit 布局与过渡层错位，交接瞬间图片会向下跳
                     .ignoresSafeArea()
@@ -392,7 +401,6 @@ struct PhotoViewerOverlay: View {
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
-        .environment(\.layoutDirection, readingOrder == .rightToLeft ? .rightToLeft : .leftToRight)
         // 页面必须真正全屏（刘海、底部指示条区域都可显示内容）
         .ignoresSafeArea()
     }
@@ -619,7 +627,7 @@ struct PhotoViewerOverlay: View {
     /// 底部胶片条（UIKit 实现，排版规则与为什么不用 SwiftUI 见 FilmstripView）。
     /// 与翻页器双向同步：翻页 → 胶片条重排并对正；点格子 / 拖动胶片条 → 翻页器换页
     private var filmstrip: some View {
-        FilmstripView(items: items, index: index, rightToLeft: readingOrder == .rightToLeft) { selected in
+        FilmstripView(items: items, index: index) { selected in
             index = selected
         }
         #if DEBUG
@@ -902,8 +910,6 @@ struct PhotoViewerOverlay: View {
 enum ViewerReadingOrder: String, CaseIterable, Identifiable {
     /// 下一张从右边往左滑进来
     case leftToRight
-    /// 下一张从左边往右滑进来（漫画）
-    case rightToLeft
     /// 竖向翻页，一屏一张
     case topToBottom
     /// 竖向连续、图片之间无间隙（像 PDF 连续滚动）
@@ -914,7 +920,6 @@ enum ViewerReadingOrder: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .leftToRight: "从左到右"
-        case .rightToLeft: "从右到左"
         case .topToBottom: "从上到下"
         case .continuous: "连续从上到下"
         }
@@ -923,7 +928,6 @@ enum ViewerReadingOrder: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .leftToRight: "arrow.right"
-        case .rightToLeft: "arrow.left"
         case .topToBottom: "arrow.down"
         case .continuous: "arrow.down.to.line.compact"
         }

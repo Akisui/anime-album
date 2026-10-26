@@ -15,7 +15,6 @@ import UIKit
 struct FilmstripView: UIViewRepresentable {
     let items: [ViewerItem]
     let index: Int
-    let rightToLeft: Bool
     var onSelect: (Int) -> Void
 
     static let height: CGFloat = 52
@@ -47,7 +46,6 @@ struct FilmstripView: UIViewRepresentable {
         #endif
         layout.items = items
         layout.anchorIndex = index
-        layout.rightToLeft = rightToLeft
         return collectionView
     }
 
@@ -74,12 +72,6 @@ struct FilmstripView: UIViewRepresentable {
             let old = self.parent
             self.parent = parent
             guard let collectionView, let layout else { return }
-            if old.rightToLeft != parent.rightToLeft {
-                layout.rightToLeft = parent.rightToLeft
-                layout.invalidateLayout()
-                collectionView.layoutIfNeeded()
-                center(animated: false)
-            }
             if old.items.map(\.id) != parent.items.map(\.id) {
                 layout.items = parent.items
                 layout.anchorIndex = min(parent.index, parent.items.count - 1)
@@ -169,7 +161,7 @@ struct FilmstripView: UIViewRepresentable {
             guard let collectionView else { return }
             scrollViewWillBeginDragging(collectionView)
             let start = collectionView.contentOffset.x
-            let distance = CGFloat(steps) * 12 * (parent.rightToLeft ? -1 : 1)
+            let distance = CGFloat(steps) * 12
             let began = CACurrentMediaTime()
             var last = began
             let link = DebugDisplayLink { [weak self, weak collectionView] link in
@@ -228,9 +220,6 @@ final class FilmstripCollectionView: UICollectionView {
 final class FilmstripLayout: UICollectionViewLayout {
     var items: [ViewerItem] = []
     var anchorIndex = 0
-    /// 从右到左（下一张在左边）：坐标自己镜像 —— 在 SwiftUI 宿主里 semanticContentAttribute 不生效
-    /// （effectiveUserInterfaceLayoutDirection 仍是从左到右，实测），flipsHorizontally… 也就不会翻转
-    var rightToLeft = false
 
     private static let gap: CGFloat = 1
     private static let currentGap: CGFloat = 5
@@ -281,16 +270,6 @@ final class FilmstripLayout: UICollectionViewLayout {
             attributes.append(attribute)
         }
         contentWidth = x
-        if rightToLeft {
-            slots = slots.map(mirrored)
-            for attribute in attributes {
-                attribute.frame = mirrored(attribute.frame)
-            }
-        }
-    }
-
-    private func mirrored(_ rect: CGRect) -> CGRect {
-        CGRect(x: contentWidth - rect.maxX, y: rect.minY, width: rect.width, height: rect.height)
     }
 
     override var collectionViewContentSize: CGSize {
