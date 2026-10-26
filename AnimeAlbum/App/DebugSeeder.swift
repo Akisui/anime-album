@@ -8,6 +8,10 @@ import SwiftUI
 enum DebugSeeder {
     /// SLOW_ANIM=1 时把窗口动画放慢 ~8 倍，便于逐帧截图验证过渡动画
     static func applyLaunchTweaks() {
+        // READING_ORDER=leftToRight|rightToLeft|topToBottom|continuous：查看器的查看顺序
+        if let order = ProcessInfo.processInfo.environment["READING_ORDER"] {
+            UserDefaults.standard.set(order, forKey: "viewerReadingOrder")
+        }
         guard ProcessInfo.processInfo.environment["SLOW_ANIM"] == "1" else { return }
         for scene in UIApplication.shared.connectedScenes {
             guard let windowScene = scene as? UIWindowScene else { continue }

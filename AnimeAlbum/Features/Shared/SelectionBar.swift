@@ -72,8 +72,9 @@ struct SelectionBarOverlay: View {
 
     var body: some View {
         ZStack {
+            // 尺寸按原生相册的选择工具栏：计数 17pt 加粗，图标是工具栏的大号符号（body + .large）
             SelectionCountLabel(count: session.count, unit: unit)
-                .font(.subheadline.weight(.semibold))
+                .font(.headline)
             HStack(spacing: 4) {
                 if case .photos = session.kind {
                     Button {
@@ -112,6 +113,8 @@ struct SelectionBarOverlay: View {
                 .accessibilityLabel("删除")
                 .disabled(session.count == 0)
             }
+            .font(.body)
+            .imageScale(.large)
             .padding(.horizontal, 8)
         }
         .frame(maxWidth: .infinity)

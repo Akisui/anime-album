@@ -347,6 +347,7 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
 
         func updateHiddenPhoto(_ id: UUID?) {
             guard id != hiddenPhotoID else { return }
+            let previous = hiddenPhotoID
             hiddenPhotoID = id
             guard let collectionView else { return }
             for indexPath in collectionView.indexPathsForVisibleItems {
@@ -356,6 +357,10 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
                     continue
                 }
                 cell.isHidden = cellID == id
+                // 照片落回格子：PDF 的细边、页数标记淡入
+                if cellID == previous, cellID != id {
+                    (cell as? PhotoCollectionCell)?.fadeInDecorations()
+                }
             }
         }
 

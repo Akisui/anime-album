@@ -36,23 +36,17 @@ final class ThumbnailCache: @unchecked Sendable {
 
     // MARK: PDF 页面
 
-    /// PDF 单页图片：tiny 给胶片条；large 给查看器（扫描页最长 4096px，原图更小则原尺寸、无损；
-    /// 矢量页按长边 2048 渲染作底图，放大后由查看器分块矢量重绘）
+    /// PDF 单页图片（导入时生成好的预览图）：tiny 给胶片条，其余给查看器（长边 2048；
+    /// 放大后矢量页由查看器分块重绘、扫描页换原图）
     func pageImage(photoID: UUID, page: Int, kind: ThumbnailKind) async -> UIImage? {
         let key = pageCacheKey(photoID: photoID, page: page, kind: kind)
         if let cached = cache.object(forKey: key) {
             return cached
         }
-        let store = PDFPageStore.shared
-        let maxPixel: Int
-        switch kind {
-        case .tiny: maxPixel = 240
-        case .small: maxPixel = 1024
-        case .large:
-            let pages = store.pages(photoID: photoID)
-            maxPixel = pages.indices.contains(page) && pages[page].kind == .raster ? 4096 : 2048
+        let preview: PDFPageStore.PreviewKind = kind == .tiny ? .tiny : .large
+        guard let image = await PDFPageStore.shared.previewImage(photoID: photoID, page: page, kind: preview) else {
+            return nil
         }
-        guard let image = await store.image(photoID: photoID, page: page, maxPixel: maxPixel) else { return nil }
         let pixelCount = Int(image.size.width * image.scale * image.size.height * image.scale)
         cache.setObject(image, forKey: key, cost: pixelCount * 4)
         return image

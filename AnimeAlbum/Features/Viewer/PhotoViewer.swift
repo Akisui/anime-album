@@ -134,6 +134,9 @@ struct PhotoViewerOverlay: View {
     @State private var editingItem: ViewerItem?
     @State private var showingNewAlbumAlert = false
     @State private var newAlbumName = ""
+    @AppStorage("viewerReadingOrder") private var readingOrderRaw = ViewerReadingOrder.leftToRight.rawValue
+    /// 连续长条模式下查询某张图在屏幕上的位置（关闭过渡的起点）
+    @State private var continuousBox = ContinuousStripBox()
 
     /// 每页缩放状态由页面的代理回调维护（含离屏自动复位），跨页切换不丢失
     private var currentPageZoomed: Bool {
@@ -177,6 +180,10 @@ struct PhotoViewerOverlay: View {
         #if DEBUG
         if ProcessInfo.processInfo.environment["FORCE_INTRUDE"] == "1" { return true }
         #endif
+        // 连续长条：图片铺满整屏
+        if readingOrder == .continuous {
+            return true
+        }
         // 优先用实时上报的图片顶边（含缩放/平移）；未上报时退回 fit 矩形估算
         if let top = imageTops[currentItem.id] {
             return top < barBottomY - 1
@@ -237,7 +244,8 @@ struct PhotoViewerOverlay: View {
                             .opacity(transitionOpacity)
                     }
                 }
-                .simultaneousGesture(dismissDrag)
+                // 竖向查看顺序下竖滑是翻页，不做下拉关闭
+                .simultaneousGesture(dismissDrag, including: readingOrder.isVertical ? .subviews : .all)
                 .onAppear {
                     containerSize = proxy.size
                     beginOpen()
@@ -351,52 +359,120 @@ struct PhotoViewerOverlay: View {
 
     // MARK: 翻页器
 
+    /// 查看顺序（「…」菜单里选，全局记住）
+    private var readingOrder: ViewerReadingOrder {
+        ViewerReadingOrder(rawValue: readingOrderRaw) ?? .leftToRight
+    }
+
     private var pager: some View {
-        TabView(selection: $index) {
-            ForEach(Array(items.enumerated()), id: \.element.id) { offset, item in
-                ZoomableImageView(
-                    item: item,
-                    isCurrent: offset == index,
-                    onSingleTap: {
-                        // 单击：图片侵入 bar 区域时用滑动式（滑开露出图片），
-                        // 否则（bar 处无图片）用淡入淡出
-                        setChrome(hidden: !presenter.chromeHidden, slide: imageIntrudesBar)
-                    },
-                    onZoomChanged: { zoomed in
-                        if zoomed {
-                            zoomedPages.insert(item.id)
-                        } else {
-                            zoomedPages.remove(item.id)
-                        }
-                        // 放大浏览时进入沉浸模式（与原生一致）：快速淡出式隐藏（图片已盖住 bar，
-                        // 慢慢淡出会显得拖沓）
-                        if zoomed, offset == index, !presenter.chromeHidden {
-                            setChrome(hidden: true, slide: false, duration: 0.12)
-                        }
-                    },
-                    onImageReady: {
-                        readyPages.insert(item.id)
-                        finishOpenIfReady()
-                    },
-                    onImageTopChanged: { top in
-                        imageTops[item.id] = top
-                    }
-                )
-                // TabView 的分页容器会给每一页重新注入安全区，页内也必须显式忽略，
-                // 否则页内 fit 布局与过渡层错位，交接瞬间图片会向下跳
-                .ignoresSafeArea()
-                .tag(offset)
+        Group {
+            switch readingOrder {
+            case .leftToRight, .rightToLeft:
+                horizontalPager
+            case .topToBottom:
+                verticalPager
+            case .continuous:
+                continuousPager
             }
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
-        // 页面必须真正全屏（刘海、底部指示条区域都可显示内容）
-        .ignoresSafeArea()
         .onChange(of: index) {
             // 拖拽接管时 TabView 的翻页手势被取消，可能瞬时抖动 index 再弹回，
             // 只在正常浏览状态下联动空白格子，避免邻居缩略图闪空白
             guard phase == .presented else { return }
             presenter.setHiddenPhoto(currentItem.photoID)
         }
+    }
+
+    /// 从左到右 / 从右到左：系统分页（从右到左 = 整个分页容器按右到左排，下一张在左边）
+    private var horizontalPager: some View {
+        TabView(selection: $index) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { offset, item in
+                zoomablePage(item, at: offset)
+                    // 页内内容不跟着镜像
+                    .environment(\.layoutDirection, .leftToRight)
+                    // TabView 的分页容器会给每一页重新注入安全区，页内也必须显式忽略，
+                    // 否则页内 fit 布局与过渡层错位，交接瞬间图片会向下跳
+                    .ignoresSafeArea()
+                    .tag(offset)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        .environment(\.layoutDirection, readingOrder == .rightToLeft ? .rightToLeft : .leftToRight)
+        // 页面必须真正全屏（刘海、底部指示条区域都可显示内容）
+        .ignoresSafeArea()
+    }
+
+    /// 从上到下：竖向分页，一屏一张
+    private var verticalPager: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { offset, item in
+                    zoomablePage(item, at: offset)
+                        .frame(width: containerSize.width, height: containerSize.height)
+                        .id(offset)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: Binding(get: { index }, set: { if let new = $0 { index = new } }))
+        .ignoresSafeArea()
+    }
+
+    /// 连续从上到下：按屏宽竖排成一条、之间无间隙，整条一起缩放
+    private var continuousPager: some View {
+        ContinuousStripView(
+            items: items,
+            index: $index,
+            box: continuousBox,
+            onSingleTap: { setChrome(hidden: !presenter.chromeHidden, slide: imageIntrudesBar) },
+            onZoomChanged: { zoomed in
+                if zoomed {
+                    zoomedPages.insert(currentItem.id)
+                } else {
+                    zoomedPages.remove(currentItem.id)
+                }
+                if zoomed, !presenter.chromeHidden {
+                    setChrome(hidden: true, slide: false, duration: 0.12)
+                }
+            },
+            onImageReady: { id in
+                readyPages.insert(id)
+                finishOpenIfReady()
+            }
+        )
+        .ignoresSafeArea()
+    }
+
+    private func zoomablePage(_ item: ViewerItem, at offset: Int) -> some View {
+        ZoomableImageView(
+            item: item,
+            isCurrent: offset == index,
+            onSingleTap: {
+                // 单击：图片侵入 bar 区域时用滑动式（滑开露出图片），
+                // 否则（bar 处无图片）用淡入淡出
+                setChrome(hidden: !presenter.chromeHidden, slide: imageIntrudesBar)
+            },
+            onZoomChanged: { zoomed in
+                if zoomed {
+                    zoomedPages.insert(item.id)
+                } else {
+                    zoomedPages.remove(item.id)
+                }
+                // 放大浏览时进入沉浸模式（与原生一致）：快速淡出式隐藏（图片已盖住 bar，
+                // 慢慢淡出会显得拖沓）
+                if zoomed, offset == index, !presenter.chromeHidden {
+                    setChrome(hidden: true, slide: false, duration: 0.12)
+                }
+            },
+            onImageReady: {
+                readyPages.insert(item.id)
+                finishOpenIfReady()
+            },
+            onImageTopChanged: { top in
+                imageTops[item.id] = top
+            }
+        )
     }
 
     /// 顶部工具栏（仅 bar 自身高度 = 状态栏 + 44，不含撑满的 Spacer —— 顶端对齐由外层负责，
@@ -471,14 +547,27 @@ struct PhotoViewerOverlay: View {
                 }
             }
             Section {
+                Picker(selection: $readingOrderRaw) {
+                    ForEach(ViewerReadingOrder.allCases) { order in
+                        Label(order.title, systemImage: order.systemImage).tag(order.rawValue)
+                    }
+                } label: {
+                    Label("查看顺序", systemImage: "book")
+                }
+                .pickerStyle(.menu)
+            }
+            Section {
                 Button("删除", systemImage: "trash", role: .destructive) {
                     pendingDeletion = currentItem
                 }
             }
         } label: {
-            Image(systemName: "ellipsis.circle")
+            // 圆形底色 + 三个点（原生相册同款），不用 ellipsis.circle 的描边圆圈
+            Image(systemName: "ellipsis")
                 .font(.body.weight(.semibold))
                 .foregroundStyle(.primary)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Color(.tertiarySystemFill)))
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
@@ -537,17 +626,19 @@ struct PhotoViewerOverlay: View {
         isScrubbing ? nil : currentItem.id
     }
 
-    /// 胶片条一格的排布。普通照片之间 2pt，当前张两侧各再空出 4pt；
-    /// 多页 PDF 的各页叠成一组（每页只露出一截，后一页压在前一页上），正在看的 PDF 整组两侧空出、
-    /// 与前后照片隔开，组内当前页完整露出、压在最上面（看得出在看 PDF 的哪一页）
+    /// 胶片条一格的排布。普通照片之间 2pt，当前张两侧各再空出 4pt。
+    /// 多页 PDF 的各页叠成一组：压在最上面的页完整露出（正在看的 PDF 是当前页，其余 PDF 是首页），
+    /// 往左、往右依次一页压一页、每页只露出一截（越远越在下面）；正在看的 PDF 整组两侧空出、与前后照片隔开
     private struct FilmstripSlot {
         var width: CGFloat
-        /// 在条里占的宽度（叠放的页小于 width，多出的部分压在后一格下面）
+        /// 在条里占的宽度（叠放的页小于 width，多出的部分压在靠近顶页的那一格下面）
         var layoutWidth: CGFloat
+        /// 叠放的页露出哪一侧：顶页左边的露左侧、右边的露右侧
+        var alignment: Alignment
         var leading: CGFloat
         var trailing: CGFloat
         var isStackedPage: Bool
-        var isOnTop: Bool
+        var zIndex: Double
     }
 
     private static let filmstripGap: CGFloat = 1
@@ -563,21 +654,20 @@ struct PhotoViewerOverlay: View {
             : itemSize.width
         guard let page = item.page, item.pageCount > 1 else {
             let gap = expanded ? Self.filmstripCurrentGap : Self.filmstripGap
-            return FilmstripSlot(width: width, layoutWidth: width, leading: gap, trailing: gap,
-                                 isStackedPage: false, isOnTop: expanded)
+            return FilmstripSlot(width: width, layoutWidth: width, alignment: .leading, leading: gap, trailing: gap,
+                                 isStackedPage: false, zIndex: expanded ? 1 : 0)
         }
-        let groupGap = item.photoID == currentItem.photoID && !isScrubbing
-            ? Self.filmstripCurrentGap : Self.filmstripGap
-        let isFirst = page == 0
-        let isLast = page == item.pageCount - 1
-        let innerGap: CGFloat = expanded ? 2 : 0
+        let isCurrentGroup = item.photoID == currentItem.photoID
+        let topPage = isCurrentGroup ? (currentItem.page ?? 0) : 0
+        let groupGap = isCurrentGroup && !isScrubbing ? Self.filmstripCurrentGap : Self.filmstripGap
         return FilmstripSlot(
             width: width,
-            layoutWidth: expanded || isLast ? width : Self.filmstripStackStep,
-            leading: isFirst ? groupGap : innerGap,
-            trailing: isLast ? groupGap : innerGap,
+            layoutWidth: page == topPage ? width : Self.filmstripStackStep,
+            alignment: page < topPage ? .leading : .trailing,
+            leading: page == 0 ? groupGap : 0,
+            trailing: page == item.pageCount - 1 ? groupGap : 0,
             isStackedPage: true,
-            isOnTop: expanded)
+            zIndex: -Double(abs(page - topPage)))
     }
 
     private var filmstrip: some View {
@@ -587,13 +677,13 @@ struct PhotoViewerOverlay: View {
                     let slot = filmstripSlot(for: item)
                     FilmstripThumbnail(item: item, size: CGSize(width: slot.width, height: Self.filmstripItemSize.height),
                                        showsEdge: slot.isStackedPage)
-                        .frame(width: slot.layoutWidth, alignment: .leading)
+                        .frame(width: slot.layoutWidth, alignment: slot.alignment)
                         .contentShape(Rectangle())
                         .onTapGesture { jumpFromFilmstrip(to: item.id) }
                         .id(item.id)
                         .padding(.leading, slot.leading)
                         .padding(.trailing, slot.trailing)
-                        .zIndex(slot.isOnTop ? 1 : 0)
+                        .zIndex(slot.zIndex)
                 }
             }
             .scrollTargetLayout()
@@ -637,6 +727,8 @@ struct PhotoViewerOverlay: View {
             jumpFromFilmstrip(to: items[target].id)
         }
         #endif
+        // 从右到左时胶片条也从右往左排（下一张在左边）
+        .environment(\.layoutDirection, readingOrder == .rightToLeft ? .rightToLeft : .leftToRight)
         .frame(height: Self.filmstripHeight)
         .padding(.bottom, stableSafeBottom)
         .background {
@@ -687,7 +779,7 @@ struct PhotoViewerOverlay: View {
         let item = currentItem
         let image = loadTransitionImage(for: item)
         transitionImage = image
-        let target = fitRect(for: imageSize(of: item, image: image), in: containerSize)
+        let target = landingRect(for: item, image: image)
         // 预热大图（翻页器当前页也在同步加载，就绪后过渡层才让位）
         Task { _ = await item.image(.large) }
 
@@ -748,7 +840,9 @@ struct PhotoViewerOverlay: View {
             // 从静止状态关闭：过渡层先在原位接管画面（与翻页器逐像素重合，切换无缝）
             let image = loadTransitionImage(for: item)
             transitionImage = image
-            transitionRect = fitRect(for: imageSize(of: item, image: image), in: containerSize)
+            transitionRect = readingOrder == .continuous
+                ? continuousBox.frameOfItem?(item.id) ?? landingRect(for: item, image: image)
+                : fitRect(for: imageSize(of: item, image: image), in: containerSize)
             transitionOpacity = 1
         }
         phase = .closing
@@ -881,6 +975,14 @@ struct PhotoViewerOverlay: View {
         return containerSize
     }
 
+    /// 打开后图片在屏幕上的位置：连续长条里按屏宽排、其余为 fit
+    private func landingRect(for item: ViewerItem, image: UIImage?) -> CGRect {
+        guard readingOrder == .continuous, let position = items.firstIndex(of: item) else {
+            return fitRect(for: imageSize(of: item, image: image), in: containerSize)
+        }
+        return ContinuousStripView.landingRect(items: items, index: position, container: containerSize)
+    }
+
     private func fitRect(for imageSize: CGSize, in container: CGSize) -> CGRect {
         guard imageSize.width > 0, imageSize.height > 0, container.width > 0, container.height > 0 else {
             return CGRect(origin: .zero, size: container)
@@ -923,5 +1025,41 @@ private struct FilmstripThumbnail: View {
                 }
                 image = await item.image(.tiny)
             }
+    }
+}
+
+/// 查看顺序（「…」→ 查看顺序）
+enum ViewerReadingOrder: String, CaseIterable, Identifiable {
+    /// 下一张从右边往左滑进来
+    case leftToRight
+    /// 下一张从左边往右滑进来（漫画）
+    case rightToLeft
+    /// 竖向翻页，一屏一张
+    case topToBottom
+    /// 竖向连续、图片之间无间隙（像 PDF 连续滚动）
+    case continuous
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .leftToRight: "从左到右"
+        case .rightToLeft: "从右到左"
+        case .topToBottom: "从上到下"
+        case .continuous: "连续从上到下"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .leftToRight: "arrow.right"
+        case .rightToLeft: "arrow.left"
+        case .topToBottom: "arrow.down"
+        case .continuous: "arrow.down.to.line.compact"
+        }
+    }
+
+    var isVertical: Bool {
+        self == .topToBottom || self == .continuous
     }
 }

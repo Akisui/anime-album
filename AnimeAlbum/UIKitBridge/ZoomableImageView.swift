@@ -53,10 +53,13 @@ struct ZoomableImageView: UIViewRepresentable {
         scrollView.addGestureRecognizer(singleTap)
 
         if item.isVectorPage, let page = item.page {
+            // 平时隐藏（底图 2048px 已够全屏清晰）：放大后才分块矢量重绘 —— 一直开着的话翻页时每页都在现场矢量渲染，会卡
             let tiled = PDFTiledPageView(photoID: item.photoID, page: page)
             tiled.frame = imageView.bounds
             tiled.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            tiled.isHidden = true
             imageView.addSubview(tiled)
+            coordinator.tiledView = tiled
         }
 
         coordinator.loadImage(item: item)
@@ -74,7 +77,11 @@ struct ZoomableImageView: UIViewRepresentable {
         var parent: ZoomableImageView
         weak var scrollView: UIScrollView?
         weak var imageView: UIImageView?
+        /// PDF 矢量页的分块重绘层（放大后才显示）
+        weak var tiledView: UIView?
         private var loadTask: Task<Void, Never>?
+        /// PDF 扫描页放大后换上的原图（只换一次）
+        private var fullImageRequested = false
         private var lastLayoutSize: CGSize = .zero
         private var pagingObservation: NSKeyValueObservation?
 
@@ -199,6 +206,21 @@ struct ZoomableImageView: UIViewRepresentable {
             }
         }
 
+        /// 放大后：矢量页显示分块重绘层；扫描页把 2048 的预览换成原图（同比例，布局不变）
+        private func updateDetailForZoom(_ zoomScale: CGFloat) {
+            let zoomed = zoomScale > 1.15
+            if let tiledView, tiledView.isHidden == zoomed {
+                tiledView.isHidden = !zoomed
+            }
+            let item = parent.item
+            guard zoomed, !fullImageRequested, let page = item.page, !item.isVectorPage else { return }
+            fullImageRequested = true
+            Task { [weak self] in
+                guard let image = await PDFPageStore.shared.fullImage(photoID: item.photoID, page: page) else { return }
+                self?.imageView?.image = image
+            }
+        }
+
         // MARK: UIScrollViewDelegate
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
@@ -207,6 +229,7 @@ struct ZoomableImageView: UIViewRepresentable {
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             centerImage()
+            updateDetailForZoom(scrollView.zoomScale)
             parent.onZoomChanged(scrollView.zoomScale > 1.02)
             reportImageTop()
         }
@@ -228,7 +251,7 @@ private final class LayoutCallbackScrollView: UIScrollView {
 
 /// PDF 矢量页的分块重绘层：随缩放按当前分辨率重绘（CATiledLayer），底下的位图只是占位底图。
 /// 分块在后台线程绘制，绘制交给独立的图层代理（不经 UIView，UIView 只能在主线程用）
-private final class PDFTiledPageView: UIView {
+final class PDFTiledPageView: UIView {
     private let tiledLayer = NoFadeTiledLayer()
     private let drawer: PDFPageDrawer
 

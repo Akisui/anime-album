@@ -77,6 +77,27 @@ final class PhotoCollectionCell: UICollectionViewCell {
         setNeedsLayout()
     }
 
+    /// 从查看器落回格子时：照片与过渡图层逐像素一致、无缝衔接；PDF 的细边与页数标记是格子独有的，
+    /// 直接出现会闪一下 —— 淡入
+    func fadeInDecorations(duration: TimeInterval = 0.25) {
+        let border = contentView.layer
+        if border.borderWidth > 0 {
+            let animation = CABasicAnimation(keyPath: "borderColor")
+            animation.fromValue = UIColor.clear.cgColor
+            animation.toValue = border.borderColor
+            animation.duration = duration
+            animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            border.add(animation, forKey: "fadeInBorder")
+        }
+        if let documentBadge, !documentBadge.isHidden {
+            let target = documentBadge.alpha
+            documentBadge.alpha = 0
+            UIView.animate(withDuration: duration, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                documentBadge.alpha = target
+            }
+        }
+    }
+
     private func makeDocumentBadge() -> UILabel {
         let label = UILabel()
         label.font = .systemFont(ofSize: 10, weight: .semibold)

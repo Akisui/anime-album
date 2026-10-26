@@ -26,8 +26,8 @@ struct PDFPageInfo: Codable, Sendable, Hashable {
     }
 }
 
-/// 页面清单与页面图片的读写。清单在导入时生成（pages/<uuid>/manifest.json），
-/// 早于拆页功能导入的 PDF 在第一次打开时补生成
+/// 页面清单与页面图片的读写。导入时生成清单（pages/<uuid>/manifest.json）和每页的预览图
+/// （large-n.png / tiny-n.png）；早于此导入的 PDF 在第一次打开时补生成
 final class PDFPageStore: @unchecked Sendable {
     static let shared = PDFPageStore()
 
@@ -76,7 +76,17 @@ final class PDFPageStore: @unchecked Sendable {
         if let data = try? JSONEncoder().encode(pages) {
             try? data.write(to: manifestURL(photoID: photoID), options: .atomic)
         }
-        lock.withLock { manifests[photoID] = pages }
+        lock.withLock {
+            manifests[photoID] = pages
+            if documents[photoID] == nil {
+                documents[photoID] = document
+            }
+        }
+        // 导入时就把每页的预览图做好：查看时只解码，不在翻页时现场渲染（现场渲染会卡）
+        for index in pages.indices {
+            makePreview(photoID: photoID, page: index, kind: .large)
+            makePreview(photoID: photoID, page: index, kind: .tiny)
+        }
         return pages
     }
 
@@ -103,34 +113,92 @@ final class PDFPageStore: @unchecked Sendable {
 
     // MARK: - 渲染
 
-    /// 页面图片，长边不超过 maxPixel（扫描页原图更小时按原尺寸 —— 无损）
-    func image(photoID: UUID, page: Int, maxPixel: Int) async -> UIImage? {
-        await withCheckedContinuation { continuation in
-            renderQueue.async {
-                continuation.resume(returning: self.renderImage(photoID: photoID, page: page, maxPixel: maxPixel))
+    /// 预览图规格：large 给查看器（长边 2048，放大后矢量页分块重绘、扫描页换原图），tiny 给胶片条
+    enum PreviewKind: String {
+        case large
+        case tiny
+
+        var maxPixel: Int {
+            switch self {
+            case .large: 2048
+            case .tiny: 240
             }
         }
     }
 
-    private func renderImage(photoID: UUID, page index: Int, maxPixel: Int) -> UIImage? {
+    private func previewURL(photoID: UUID, page: Int, kind: PreviewKind) -> URL {
+        directory(photoID: photoID).appendingPathComponent("\(kind.rawValue)-\(page + 1).png")
+    }
+
+    /// 页面预览图：导入时就生成好（PNG，无损），这里只解码；缺了（早先导入的 PDF）现场生成并补存
+    func previewImage(photoID: UUID, page: Int, kind: PreviewKind) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            renderQueue.async {
+                continuation.resume(returning: self.loadOrMakePreview(photoID: photoID, page: page, kind: kind))
+            }
+        }
+    }
+
+    /// 扫描页的原图（放大查看用，无损）；长边超过 8192 时缩到 8192
+    func fullImage(photoID: UUID, page: Int) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            renderQueue.async {
+                let pages = self.pages(photoID: photoID)
+                guard pages.indices.contains(page), pages[page].kind == .raster, let file = pages[page].file else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let url = self.directory(photoID: photoID).appendingPathComponent(file)
+                continuation.resume(returning: Self.decode(url: url, maxPixel: 8192))
+            }
+        }
+    }
+
+    private func loadOrMakePreview(photoID: UUID, page: Int, kind: PreviewKind) -> UIImage? {
+        let url = previewURL(photoID: photoID, page: page, kind: kind)
+        if let image = Self.decode(url: url, maxPixel: nil) {
+            return image
+        }
+        return makePreview(photoID: photoID, page: page, kind: kind)
+    }
+
+    @discardableResult
+    private func makePreview(photoID: UUID, page index: Int, kind: PreviewKind) -> UIImage? {
         let pages = pages(photoID: photoID)
         guard pages.indices.contains(index) else { return nil }
         let info = pages[index]
+        let image: UIImage?
         if info.kind == .raster, let file = info.file {
-            let url = directory(photoID: photoID).appendingPathComponent(file)
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
-            ]
-            return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
+            image = Self.decode(url: directory(photoID: photoID).appendingPathComponent(file), maxPixel: kind.maxPixel)
+        } else if let page = cgPage(photoID: photoID, index: index) {
+            let size = Self.displaySize(of: page)
+            image = Self.render(page: page, scale: CGFloat(kind.maxPixel) / max(size.width, size.height))
+        } else {
+            image = nil
         }
-        guard let page = cgPage(photoID: photoID, index: index) else { return nil }
-        let size = Self.displaySize(of: page)
-        let scale = CGFloat(maxPixel) / max(size.width, size.height)
-        return Self.render(page: page, scale: scale)
+        if let data = image?.pngData() {
+            try? data.write(to: previewURL(photoID: photoID, page: index, kind: kind), options: .atomic)
+        }
+        return image
+    }
+
+    private static func decode(url: URL, maxPixel: Int?) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else {
+            return nil
+        }
+        var options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        if let maxPixel {
+            options[kCGImageSourceThumbnailMaxPixelSize] = maxPixel
+        } else if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+            let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+            let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+            options[kCGImageSourceThumbnailMaxPixelSize] = max(width, height, 1)
+        }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
     }
 
     /// 矢量页的 CGPDFPage（查看器放大时分块重绘用）
