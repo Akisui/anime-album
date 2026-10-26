@@ -69,7 +69,7 @@ final class PDFPageStore: @unchecked Sendable {
                         try? FileManager.default.removeItem(at: directory.appendingPathComponent(old))
                     }
                 }
-                let marker = directory.appendingPathComponent("cover-from-page1")
+                let marker = self.coverMarkerURL(photoID: photoID)
                 guard !FileManager.default.fileExists(atPath: marker.path),
                       let size = ImageStore.shared.rebuildPDFThumbnails(photoID: photoID)
                 else {
@@ -79,6 +79,15 @@ final class PDFPageStore: @unchecked Sendable {
                 onCoverRebuilt(photoID, size.width, size.height)
             }
         }
+    }
+
+    private func coverMarkerURL(photoID: UUID) -> URL {
+        directory(photoID: photoID).appendingPathComponent("cover-from-page1")
+    }
+
+    /// 网格缩略图已用处理后的首页做好（导入时写；启动时的 upgrade 据此跳过）
+    func markCoverBuilt(photoID: UUID) {
+        FileManager.default.createFile(atPath: coverMarkerURL(photoID: photoID).path, contents: nil)
     }
 
     /// 处理后的首页预览图（网格缩略图用它做，与查看器里的第 1 页是同一张图）

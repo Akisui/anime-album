@@ -172,8 +172,8 @@ final class ImageStore: Sendable {
         PDFPageStore.shared.prepare(photoID: photoID, pdfData: data, progress: progress)
         // 网格缩略图用处理后的首页做：与查看器里的第 1 页是同一张图（扫描页裁掉了白边）。
         // 用整页渲染的话，打开时过渡图带白边、小一圈，大图换上后突然变大（用户反馈）
-        let cover = PDFPageStore.shared.firstPagePreviewURL(photoID: photoID)
-            .flatMap { CGImageSourceCreateWithURL($0 as CFURL, nil) } ?? source
+        let coverURL = PDFPageStore.shared.firstPagePreviewURL(photoID: photoID)
+        let cover = coverURL.flatMap { CGImageSourceCreateWithURL($0 as CFURL, nil) } ?? source
         let (width, height) = Self.pixelSize(of: cover)
         do {
             for kind in ThumbnailKind.allCases {
@@ -182,6 +182,9 @@ final class ImageStore: Sendable {
         } catch {
             deleteFiles(relativePath: relativePath, photoID: photoID)
             throw error
+        }
+        if coverURL != nil {
+            PDFPageStore.shared.markCoverBuilt(photoID: photoID)
         }
         return StoredImage(relativePath: relativePath, width: width, height: height, pageCount: document.pageCount)
     }
