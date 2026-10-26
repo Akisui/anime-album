@@ -97,6 +97,10 @@ struct PhotoViewerOverlay: View {
     @State private var transitionRect: CGRect = .zero
     @State private var transitionImage: UIImage?
     @State private var transitionOpacity: Double = 1
+    /// 关闭时叠在过渡图上、渐显的格子缩略图：PDF 从第 2 页以后关闭时，过渡图是当前页、格子显示的是首页，
+    /// 落回瞬间直接换图很突兀（用户反馈）—— 缩回途中渐变成首页
+    @State private var transitionCoverImage: UIImage?
+    @State private var transitionCoverOpacity: Double = 0
     /// 过渡图层的裁切窗（全局坐标）：打开时从「格子 ∩ 网格可见区域」展开到全屏，
     /// 关闭时反向收拢 —— 格子被导航栏/Tab 栏遮住的部分在过渡中保持被遮，
     /// 从 bar 底下滑出/缩回（原生同款），而不是瞬间穿透显示到 bar 之上
@@ -222,9 +226,17 @@ struct PhotoViewerOverlay: View {
                     if phase != .presented, let transitionImage {
                         let mask = maskRect.isEmpty
                             ? CGRect(origin: .zero, size: containerSize) : maskRect
-                        Image(uiImage: transitionImage)
-                            .resizable()
-                            .scaledToFill()
+                        ZStack {
+                            Image(uiImage: transitionImage)
+                                .resizable()
+                                .scaledToFill()
+                            if let transitionCoverImage {
+                                Image(uiImage: transitionCoverImage)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .opacity(transitionCoverOpacity)
+                            }
+                        }
                             .frame(
                                 width: max(transitionRect.width, 1),
                                 height: max(transitionRect.height, 1))
@@ -313,13 +325,16 @@ struct PhotoViewerOverlay: View {
                     setChrome(hidden: true, slide: true)
                 }
             } else if let action = env["VIEWER_ACTION"] {
-                // VIEWER_ACTION=crop 打开裁剪编辑器；delete 直接删除当前张（跳过确认框），验证删除后的翻页 / 关闭
+                // VIEWER_ACTION=crop 打开裁剪编辑器；delete 直接删除当前张（跳过确认框），验证删除后的翻页 / 关闭；
+                // close 关闭查看器（配合 SLOW_ANIM=1 录屏看过渡）
                 Task {
                     try? await Task.sleep(for: .seconds(1))
                     if action == "crop" {
                         editingItem = currentItem
                     } else if action == "delete" {
                         delete(currentItem)
+                    } else if action == "close" {
+                        beginClose()
                     }
                 }
             } else if env["AUTO_TAP"] == "1" {
@@ -734,6 +749,12 @@ struct PhotoViewerOverlay: View {
         let visible = gridVisibleRect
         maskRect = screen
         if returnsToGrid, let target = session.sourceFrame(item.photoID), target.intersects(visible) {
+            // PDF 非首页：格子显示的是首页，缩回途中渐变过去（时长曲线与缩回同一个动画）
+            transitionCoverImage = (item.page ?? 0) > 0
+                ? ThumbnailCache.shared.cachedImage(for: item.photoID, kind: .small)
+                    ?? ImageStore.shared.loadThumbnail(photoID: item.photoID, kind: .small)
+                : nil
+            transitionCoverOpacity = 0
             withAnimation(
                 .spring(response: 0.28 * Self.slowFactor, dampingFraction: 0.88),
                 completionCriteria: .logicallyComplete
@@ -741,6 +762,7 @@ struct PhotoViewerOverlay: View {
                 transitionRect = target
                 maskRect = target.intersection(visible)
                 backdropOpacity = 0
+                transitionCoverOpacity = 1
             } completion: {
                 // end() 同时恢复网格格子的显示 —— 图片"落回"格子的瞬间格子才重新出现
                 presenter.end()
