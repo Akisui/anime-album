@@ -85,6 +85,37 @@ struct AlbumsView: View {
                 if env["OPEN_ALBUM"] == "1", let first = albums.first {
                     navigationPath.append(first)
                 }
+                // TAP_ALBUM=秒：等这么久后按点按同一套逻辑打开第一个相簿，并逐帧记录推入期间的掉帧
+                if let raw = env["TAP_ALBUM"], let delay = Double(raw), let first = albums.first {
+                    try? await Task.sleep(for: .seconds(delay))
+                    var last = CACurrentMediaTime()
+                    var gaps: [Int] = []
+                    let monitor = DebugDisplayLink { _ in
+                        let now = CACurrentMediaTime()
+                        if now - last > 0.020 { gaps.append(Int((now - last) * 1000)) }
+                        last = now
+                    }
+                    monitor.start()
+                    open(first)
+                    try? await Task.sleep(for: .seconds(1))
+                    monitor.stop()
+                    print("PUSH_HITCHES first \(gaps)")
+                    // 返回再进一次，对比第二次
+                    navigationPath.removeLast()
+                    try? await Task.sleep(for: .seconds(1))
+                    gaps = []
+                    last = CACurrentMediaTime()
+                    let monitor2 = DebugDisplayLink { _ in
+                        let now = CACurrentMediaTime()
+                        if now - last > 0.020 { gaps.append(Int((now - last) * 1000)) }
+                        last = now
+                    }
+                    monitor2.start()
+                    open(first)
+                    try? await Task.sleep(for: .seconds(1))
+                    monitor2.stop()
+                    print("PUSH_HITCHES second \(gaps)")
+                }
                 // ALBUMS_SELECT=n 自动进入相簿列表的选择模式并预选前 n 个
                 if let raw = env["ALBUMS_SELECT"], let count = Int(raw) {
                     try? await Task.sleep(for: .seconds(0.6))
@@ -105,12 +136,7 @@ struct AlbumsView: View {
                         if isSelecting {
                             toggleSelection(album)
                         } else {
-                            // 明确带动画推入：偶尔按下的事务里动画被禁掉，相簿页直接出现、没有从右往左的过渡（用户反馈）
-                            var transaction = Transaction(animation: .default)
-                            transaction.disablesAnimations = false
-                            withTransaction(transaction) {
-                                navigationPath.append(album)
-                            }
+                            open(album)
                         }
                     } label: {
                         AlbumCard(album: album, isSelected: isSelecting && selectedIDs.contains(album.id))
@@ -135,6 +161,15 @@ struct AlbumsView: View {
             .padding(.horizontal, 20)
             .padding(.top, 4)
             .padding(.bottom, 24)
+        }
+    }
+
+    private func open(_ album: Album) {
+        // 明确带动画推入：偶尔按下的事务里动画被禁掉，相簿页直接出现、没有从右往左的过渡（用户反馈）
+        var transaction = Transaction(animation: .default)
+        transaction.disablesAnimations = false
+        withTransaction(transaction) {
+            navigationPath.append(album)
         }
     }
 

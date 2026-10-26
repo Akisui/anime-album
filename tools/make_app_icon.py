@@ -1,4 +1,5 @@
-"""角色相册 App 图标：渐变底 + 叠放的三张圆角照片卡，最前一张里是天空与四角星光。
+"""角色相册 App 图标：渐变底 + 叠放的三张圆角照片卡，最前一张照片里是动漫角色的半身像
+（长发、刘海、呆毛、大眼睛 —— 一眼看出是「角色」的相册），旁边一颗星光点缀。
 用法：python3 tools/make_app_icon.py AnimeAlbum/Assets.xcassets/AppIcon.appiconset  —— 生成 AppIcon.png / AppIcon-Dark.png / AppIcon-Tinted.png（1024px）
 """
 import math
@@ -78,7 +79,68 @@ def paste_rotated(canvas, layer, center, angle, shadow=None):
     canvas.alpha_composite(rotated, (x, y))
 
 
-def make_icon(dark=False):
+def draw_character(photo, dark, tinted=False):
+    """照片里的角色半身像：后发 → 肩膀 → 脖子 → 脸 → 刘海 → 呆毛 → 眼睛 / 腮红"""
+    pw, ph = photo.size
+    d = ImageDraw.Draw(photo)
+    X = lambda v: pw * v
+    Y = lambda v: ph * v
+    if tinted:
+        # 染色版：系统按亮度着色，主体要亮 —— 头发用浅色，不然转灰度后是一块黑
+        hair, hair_shade = (214, 206, 246), (188, 178, 232)
+        skin, cloth, collar = (255, 250, 248), (255, 255, 255), (236, 230, 255)
+        eye, blush = (90, 70, 160), (255, 214, 226)
+    elif dark:
+        hair, hair_shade = (150, 128, 236), (118, 98, 206)
+        skin, cloth, collar = (255, 236, 226), (214, 204, 246), (250, 246, 255)
+        eye, blush = (70, 52, 140), (255, 168, 190)
+    else:
+        hair, hair_shade = (126, 98, 226), (98, 74, 196)
+        skin, cloth, collar = (255, 240, 232), (255, 255, 255), (232, 222, 255)
+        eye, blush = (64, 44, 140), (255, 160, 186)
+
+    # 后发：披到肩下的长发
+    d.rounded_rectangle((X(0.22), Y(0.24), X(0.78), Y(0.98)), radius=X(0.22), fill=hair_shade)
+    # 肩膀 / 上身（被照片下沿截掉）
+    d.rounded_rectangle((X(0.12), Y(0.78), X(0.88), Y(1.40)), radius=X(0.22), fill=cloth)
+    # 领口：小三角
+    d.polygon([(X(0.40), Y(0.78)), (X(0.60), Y(0.78)), (X(0.50), Y(0.90))], fill=collar)
+    # 脖子
+    d.rectangle((X(0.445), Y(0.64), X(0.555), Y(0.80)), fill=skin)
+    # 脸
+    d.ellipse((X(0.30), Y(0.30), X(0.70), Y(0.72)), fill=skin)
+    # 刘海：头顶发帽 + 锯齿发梢
+    d.ellipse((X(0.27), Y(0.20), X(0.73), Y(0.58)), fill=hair)
+    fringe = [(X(0.27), Y(0.40))]
+    tips = [0.27, 0.35, 0.43, 0.51, 0.59, 0.67, 0.73]
+    for i in range(len(tips) - 1):
+        a, b = tips[i], tips[i + 1]
+        fringe.append((X((a + b) / 2), Y(0.50 if i % 2 == 0 else 0.47)))
+        fringe.append((X(b), Y(0.40)))
+    fringe += [(X(0.73), Y(0.36)), (X(0.27), Y(0.36))]
+    d.polygon(fringe, fill=hair)
+    # 两侧垂下的鬓发
+    d.rounded_rectangle((X(0.25), Y(0.36), X(0.34), Y(0.78)), radius=X(0.045), fill=hair)
+    d.rounded_rectangle((X(0.66), Y(0.36), X(0.75), Y(0.78)), radius=X(0.045), fill=hair)
+    # 呆毛：头顶一撮弯弯的头发（月牙形）
+    ahoge = []
+    for i in range(13):
+        t = i / 12
+        ahoge.append((X(0.50 + 0.10 * t), Y(0.215 - 0.12 * math.sin(math.pi * t * 0.9))))
+    for i in range(13):
+        t = 1 - i / 12
+        ahoge.append((X(0.52 + 0.08 * t), Y(0.215 - 0.085 * math.sin(math.pi * t * 0.9))))
+    d.polygon(ahoge, fill=hair)
+    # 大眼睛 + 高光
+    for ex in (0.415, 0.585):
+        d.ellipse((X(ex - 0.035), Y(0.525), X(ex + 0.035), Y(0.615)), fill=eye)
+        d.ellipse((X(ex - 0.012), Y(0.535), X(ex + 0.010), Y(0.565)), fill=(255, 255, 255))
+    # 腮红
+    for bx in (0.375, 0.625):
+        d.ellipse((X(bx - 0.035), Y(0.635), X(bx + 0.035), Y(0.665)), fill=blush)
+
+
+def make_icon(dark=False, tinted=False):
     if dark:
         bg = diagonal_gradient((S, S), (58, 40, 84), (24, 22, 46))
         back_face, back_alpha = (255, 255, 255), 46
@@ -105,16 +167,12 @@ def make_icon(dark=False):
     inset = int(S * 0.028)
     photo_w, photo_h = card_w - inset * 2, int(card_h * 0.78)
     photo = vertical_gradient((photo_w, photo_h), sky_top, sky_bottom).convert("RGBA")
+    draw_character(photo, dark, tinted)
     d = ImageDraw.Draw(photo)
-    # 远处的山丘（两层），给画面一个「照片」的地平线
-    hill_far = (226, 214, 255) if not dark else (130, 110, 200)
-    hill_near = (255, 255, 255) if not dark else (196, 180, 240)
-    d.ellipse((-photo_w * 0.3, photo_h * 0.70, photo_w * 0.75, photo_h * 1.5), fill=hill_far)
-    d.ellipse((photo_w * 0.35, photo_h * 0.78, photo_w * 1.35, photo_h * 1.6), fill=hill_near)
-    # 星光：一大一小
+    # 星光点缀：左上一大、右上一小
     star = (255, 255, 255) if not dark else (255, 246, 214)
-    sparkle(d, photo_w * 0.56, photo_h * 0.40, photo_w * 0.26, star)
-    sparkle(d, photo_w * 0.24, photo_h * 0.22, photo_w * 0.085, star)
+    sparkle(d, photo_w * 0.15, photo_h * 0.17, photo_w * 0.085, star)
+    sparkle(d, photo_w * 0.86, photo_h * 0.30, photo_w * 0.05, star)
     photo_mask = rounded_mask((photo_w, photo_h), int(radius * 0.6))
     front.paste(photo, (inset, inset), photo_mask)
     # 相框下沿留白处的一行「标题」短线（拍立得的书写区）
@@ -142,5 +200,5 @@ if __name__ == "__main__":
     light = make_icon(dark=False)
     light.save(f"{out}/AppIcon.png")
     make_icon(dark=True).save(f"{out}/AppIcon-Dark.png")
-    make_tinted(light).save(f"{out}/AppIcon-Tinted.png")
+    make_tinted(make_icon(tinted=True)).save(f"{out}/AppIcon-Tinted.png")
     print("done")

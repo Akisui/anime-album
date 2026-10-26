@@ -16,6 +16,8 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var viewerPresenter = ViewerPresenter()
     @State private var selectionBarPresenter = SelectionBarPresenter()
+    /// 启动后在屏幕外预先搭一遍相簿页（见 albumPagePrewarm）
+    @State private var prewarmAlbum: Album?
     @State private var selectedTab: RootTab = {
         #if DEBUG
         // 调试辅助：INITIAL_TAB=albums 直接落在相簿页，方便自动化截图
@@ -27,6 +29,14 @@ struct RootView: View {
     }()
 
     var body: some View {
+        tabs
+            .background { albumPagePrewarm }
+            .environment(viewerPresenter)
+            .environment(selectionBarPresenter)
+            .task { await launchTasks() }
+    }
+
+    private var tabs: some View {
         TabView(selection: $selectedTab) {
             Tab("图库", systemImage: "photo.on.rectangle.angled", value: RootTab.library) {
                 LibraryView()
@@ -91,38 +101,60 @@ struct RootView: View {
             }
         }
         .statusBarHidden(viewerPresenter.session != nil && viewerPresenter.chromeHidden)
-        .environment(viewerPresenter)
-        .environment(selectionBarPresenter)
-        .task {
-            // 旧规则拆页的 PDF 在后台按新规则重做
-            let pdfs = (try? modelContext.fetch(FetchDescriptor<Photo>()))?.filter(\.isPDF).map(\.id) ?? []
-            PDFPageStore.shared.upgrade(photoIDs: pdfs) { photoID, width, height in
-                Task { @MainActor in
-                    let id = photoID
-                    var descriptor = FetchDescriptor<Photo>(predicate: #Predicate { $0.id == id })
-                    descriptor.fetchLimit = 1
-                    guard let photo = (try? modelContext.fetch(descriptor))?.first else { return }
-                    photo.width = width
-                    photo.height = height
-                    // 版本号变了：网格 / 封面 / 查看器重新加载缩略图
-                    photo.editRevision += 1
-                    ThumbnailCache.shared.evict(photoID: photoID)
-                    try? modelContext.save()
-                }
+    }
+
+    private func launchTasks() async {
+        // 旧规则拆页的 PDF 在后台按新规则重做
+        let pdfs = (try? modelContext.fetch(FetchDescriptor<Photo>()))?.filter(\.isPDF).map(\.id) ?? []
+        PDFPageStore.shared.upgrade(photoIDs: pdfs) { photoID, width, height in
+            Task { @MainActor in
+                let id = photoID
+                var descriptor = FetchDescriptor<Photo>(predicate: #Predicate { $0.id == id })
+                descriptor.fetchLimit = 1
+                guard let photo = (try? modelContext.fetch(descriptor))?.first else { return }
+                photo.width = width
+                photo.height = height
+                // 版本号变了：网格 / 封面 / 查看器重新加载缩略图
+                photo.editRevision += 1
+                ThumbnailCache.shared.evict(photoID: photoID)
+                try? modelContext.save()
             }
-            #if DEBUG
-            DebugSeeder.applyLaunchTweaks()
-            await DebugSeeder.seedIfRequested(context: modelContext)
-            let env = ProcessInfo.processInfo.environment
-            // SIDEBAR_ALBUM=1：直接选中侧栏第一个相簿（iPad）；AUTO_NEW_ALBUM=1：1.5s 后模拟按下 ⌘N
-            if env["SIDEBAR_ALBUM"] == "1", let first = albums.first {
-                selectedTab = .album(first.id)
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard prewarmAlbum == nil, let first = albums.first else { return }
+            prewarmAlbum = first
+            try? await Task.sleep(for: .seconds(0.5))
+            prewarmAlbum = nil
+        }
+        #if DEBUG
+        DebugSeeder.applyLaunchTweaks()
+        await DebugSeeder.seedIfRequested(context: modelContext)
+        let env = ProcessInfo.processInfo.environment
+        // SIDEBAR_ALBUM=1：直接选中侧栏第一个相簿（iPad）；AUTO_NEW_ALBUM=1：1.5s 后模拟按下 ⌘N
+        if env["SIDEBAR_ALBUM"] == "1", let first = albums.first {
+            selectedTab = .album(first.id)
+        }
+        if env["AUTO_NEW_ALBUM"] == "1" {
+            try? await Task.sleep(for: .seconds(1.5))
+            commandCenter.newAlbumRequested = true
+        }
+        #endif
+    }
+
+    /// 启动后第一次进相簿要现场搭相簿页（SwiftUI 第一次建导航栏按钮 / 菜单、UIKit 第一次建网格），
+    /// 主线程卡 140～180ms（模拟器实测，第二次进 0 掉帧），手机刚启动时更久，推入动画被吃掉、相簿页直接出现（用户反馈）。
+    /// 启动 1s 后在屏幕外不可见地搭一遍再拆掉，之后点进相簿就和第二次进入一样
+    @ViewBuilder
+    private var albumPagePrewarm: some View {
+        if let prewarmAlbum {
+            NavigationStack {
+                AlbumDetailView(album: prewarmAlbum)
             }
-            if env["AUTO_NEW_ALBUM"] == "1" {
-                try? await Task.sleep(for: .seconds(1.5))
-                commandCenter.newAlbumRequested = true
-            }
-            #endif
+            .frame(width: 390, height: 700)
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
     }
 
