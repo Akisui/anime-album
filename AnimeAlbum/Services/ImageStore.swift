@@ -1,3 +1,4 @@
+import AVFoundation
 import CryptoKit
 import Foundation
 import ImageIO
@@ -58,6 +59,11 @@ struct StoredImage: Sendable {
     let height: Int
     /// PDF 的页数；图片为 nil
     var pageCount: Int?
+    var mediaType: Photo.MediaType = .image
+    /// 视频 / 实况照片配套视频的时长（秒）
+    var duration: Double = 0
+    /// 实况照片的配套视频
+    var pairedVideoRelativePath: String?
 }
 
 enum ImageStoreError: Error {
@@ -108,8 +114,137 @@ final class ImageStore: Sendable {
         baseURL.appendingPathComponent("thumbnails/\(kind.directoryName)", isDirectory: true)
     }
 
+    /// 原图（originals/…）在同步开启时放 iCloud 云盘容器：本机已有的旧文件还没搬走前仍从本机读，
+    /// 新写入的直接进云盘
     func url(forRelativePath path: String) -> URL {
-        baseURL.appendingPathComponent(path)
+        let local = baseURL.appendingPathComponent(path)
+        guard path.hasPrefix("originals/"), let cloudBase = cloud.base,
+              !FileManager.default.fileExists(atPath: local.path)
+        else {
+            return local
+        }
+        return cloudBase.appendingPathComponent(path)
+    }
+
+    // MARK: - iCloud 云盘里的原图（DESIGN.md §8.1）
+
+    private let cloud = CloudOriginalsLocation()
+    private static let originalsInCloudKey = "originalsInICloud"
+
+    /// 启动时调用（后台进行）：同步开启 → 定位 iCloud 云盘容器、把本机原图搬上去；
+    /// 同步关闭但之前搬上去过 → 下载回来搬回本机。缩略图、PDF 拆页、裁剪前备份始终在本机
+    func configureCloudOriginals(enabled: Bool) {
+        DispatchQueue.global(qos: .utility).async {
+            let wasInCloud = UserDefaults.standard.bool(forKey: Self.originalsInCloudKey)
+            guard enabled || wasInCloud,
+                  let container = FileManager.default.url(
+                      forUbiquityContainerIdentifier: CloudSyncSettings.containerIdentifier)
+            else {
+                return
+            }
+            let cloudBase = container.appendingPathComponent("Documents", isDirectory: true)
+            try? FileManager.default.createDirectory(
+                at: cloudBase.appendingPathComponent("originals", isDirectory: true), withIntermediateDirectories: true)
+            self.cloud.base = cloudBase
+            if enabled {
+                self.moveLocalOriginals(toCloud: cloudBase)
+                UserDefaults.standard.set(true, forKey: Self.originalsInCloudKey)
+            } else if self.moveCloudOriginalsBack(from: cloudBase) {
+                UserDefaults.standard.set(false, forKey: Self.originalsInCloudKey)
+                self.cloud.base = nil
+            }
+        }
+    }
+
+    private func moveLocalOriginals(toCloud cloudBase: URL) {
+        let fileManager = FileManager.default
+        for file in Self.files(under: originalsURL) {
+            let relative = file.path.replacingOccurrences(of: baseURL.path + "/", with: "")
+            let destination = cloudBase.appendingPathComponent(relative)
+            try? fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: destination.path) {
+                try? fileManager.removeItem(at: file)
+            } else {
+                try? fileManager.setUbiquitous(true, itemAt: file, destinationURL: destination)
+            }
+        }
+    }
+
+    /// 全部搬回成功返回 true（没下载下来的下次启动再试）
+    private func moveCloudOriginalsBack(from cloudBase: URL) -> Bool {
+        let fileManager = FileManager.default
+        var allMoved = true
+        for file in Self.files(under: cloudBase.appendingPathComponent("originals", isDirectory: true)) {
+            let real = Self.realURL(forCloudEntry: file)
+            let relative = real.path.replacingOccurrences(of: cloudBase.path + "/", with: "")
+            let destination = baseURL.appendingPathComponent(relative)
+            try? fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            guard Self.waitUntilDownloaded(real, timeout: 60),
+                  (try? fileManager.setUbiquitous(false, itemAt: real, destinationURL: destination)) != nil
+            else {
+                allMoved = false
+                continue
+            }
+        }
+        return allMoved
+    }
+
+    private static func files(under directory: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: [])
+        else {
+            return []
+        }
+        return enumerator.compactMap { $0 as? URL }.filter {
+            (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }
+    }
+
+    /// 没下载到本机的云盘文件以「.原名.icloud」占位：换回原名
+    private static func realURL(forCloudEntry url: URL) -> URL {
+        let name = url.lastPathComponent
+        guard name.hasPrefix("."), name.hasSuffix(".icloud") else { return url }
+        return url.deletingLastPathComponent().appendingPathComponent(String(name.dropFirst().dropLast(7)))
+    }
+
+    /// 云盘里的文件确保已下载到本机（其他设备导入的、或被系统清理掉本地副本的）；本机文件直接返回 true
+    func ensureDownloaded(_ url: URL, timeout: TimeInterval = 60) async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: Self.waitUntilDownloaded(url, timeout: timeout))
+            }
+        }
+    }
+
+    @discardableResult
+    static func waitUntilDownloaded(_ url: URL, timeout: TimeInterval) -> Bool {
+        let fileManager = FileManager.default
+        let deadline = Date().addingTimeInterval(timeout)
+        var requested = false
+        while true {
+            let values = try? url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+            if let values, values.isUbiquitousItem != true {
+                return fileManager.fileExists(atPath: url.path)
+            }
+            if values?.ubiquitousItemDownloadingStatus == .current {
+                return true
+            }
+            if !requested {
+                requested = (try? fileManager.startDownloadingUbiquitousItem(at: url)) != nil
+            }
+            if Date() > deadline {
+                return false
+            }
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+    }
+
+    /// 云盘里的文件要用文件协调来删（没下载到本机的也能删，删除会同步到其他设备）
+    private static func removeCoordinated(_ url: URL) {
+        var error: NSError?
+        NSFileCoordinator().coordinate(writingItemAt: url, options: .forDeleting, error: &error) { target in
+            try? FileManager.default.removeItem(at: target)
+        }
     }
 
     private func thumbnailURL(photoID: UUID, kind: ThumbnailKind) -> URL {
@@ -151,7 +286,88 @@ final class ImageStore: Sendable {
             throw error
         }
 
-        return StoredImage(relativePath: relativePath, width: width, height: height)
+        // 多帧的 GIF / APNG 等：动图，查看器里循环播放
+        let animated = CGImageSourceGetCount(source) > 1
+        return StoredImage(relativePath: relativePath, width: width, height: height,
+                           mediaType: animated ? .gif : .image)
+    }
+
+    // MARK: - 视频 / 实况照片
+
+    /// 视频：文件原样拷进原图目录（不整个读进内存），缩略图取第 0.1 秒那一帧
+    func storeVideo(fileAt source: URL, photoID: UUID) async throws -> StoredImage {
+        let ext = source.pathExtension.isEmpty ? "mov" : source.pathExtension.lowercased()
+        let bucket = String(photoID.uuidString.prefix(2)).lowercased()
+        let relativePath = "originals/\(bucket)/\(photoID.uuidString).\(ext)"
+        let destination = url(forRelativePath: relativePath)
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.copyItem(at: source, to: destination)
+        do {
+            let (frame, size, duration) = try await Self.posterFrame(ofVideoAt: destination)
+            try writeThumbnails(from: frame, photoID: photoID)
+            return StoredImage(relativePath: relativePath, width: Int(size.width), height: Int(size.height),
+                               mediaType: .video, duration: duration)
+        } catch {
+            deleteFiles(relativePath: relativePath, photoID: photoID)
+            throw error
+        }
+    }
+
+    /// 实况照片：静态原图走图片的存法，配套视频存在旁边（<uuid>.live.mov）
+    func storeLivePhoto(photoData: Data, videoAt video: URL, photoID: UUID) async throws -> StoredImage {
+        let still = try store(data: photoData, photoID: photoID)
+        let bucket = String(photoID.uuidString.prefix(2)).lowercased()
+        let pairPath = "originals/\(bucket)/\(photoID.uuidString).live.mov"
+        let pairURL = url(forRelativePath: pairPath)
+        try? FileManager.default.removeItem(at: pairURL)
+        try FileManager.default.copyItem(at: video, to: pairURL)
+        let duration = (try? await AVURLAsset(url: pairURL).load(.duration).seconds) ?? 0
+        return StoredImage(relativePath: still.relativePath, width: still.width, height: still.height,
+                           mediaType: .live, duration: duration, pairedVideoRelativePath: pairPath)
+    }
+
+    /// 视频的封面帧（已按拍摄方向摆正）、显示尺寸、时长
+    static func posterFrame(ofVideoAt url: URL) async throws -> (CGImage, CGSize, Double) {
+        let asset = AVURLAsset(url: url)
+        let duration = try await asset.load(.duration).seconds
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+            throw ImageStoreError.unreadableImage
+        }
+        let (natural, transform) = try await track.load(.naturalSize, .preferredTransform)
+        let oriented = natural.applying(transform)
+        let size = CGSize(width: abs(oriented.width), height: abs(oriented.height))
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let time = CMTime(seconds: min(0.1, max(duration / 2, 0)), preferredTimescale: 600)
+        let (image, _) = try await generator.image(at: time)
+        return (image, size, duration)
+    }
+
+    /// 由一帧位图写全部尺寸的缩略图（视频封面用）
+    private func writeThumbnails(from frame: CGImage, photoID: UUID) throws {
+        guard let png = UIImage(cgImage: frame).pngData(),
+              let source = CGImageSourceCreateWithData(png as CFData, nil)
+        else {
+            throw ImageStoreError.thumbnailFailed
+        }
+        for kind in ThumbnailKind.allCases {
+            try writeThumbnail(from: source, photoID: photoID, kind: kind, width: frame.width, height: frame.height)
+        }
+    }
+
+    @available(iOS, deprecated: 16.0, message: "只在 GCD 串行队列上重建缩略图时用")
+    private static func posterFrameSync(ofVideoAt url: URL) -> CGImage? {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        return try? generator.copyCGImage(at: CMTime(seconds: 0.1, preferredTimescale: 600), actualTime: nil)
+    }
+
+    static func isVideoFile(_ url: URL) -> Bool {
+        UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) ?? false
     }
 
     /// PDF（DESIGN.md §8.3）：原文件落盘，缩略图由首页渲染（白底），之后与图片走同一套缩略图管线
@@ -280,6 +496,10 @@ final class ImageStore: Sendable {
             await ensureThumbnail(photoID: photoID, kind: .small)
             return
         }
+        // 原图在云盘、还没下载到本机（其他设备导入的）：先下载
+        if let original = originalURL(photoID: photoID) {
+            await ensureDownloaded(original)
+        }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             rebuildQueue.async {
                 self.rebuildThumbnail(photoID: photoID, kind: kind)
@@ -333,15 +553,34 @@ final class ImageStore: Sendable {
 
     /// 原图文件（originals/<桶>/<uuid>.<扩展名>）
     func originalURL(photoID: UUID) -> URL? {
-        let bucket = originalsURL.appendingPathComponent(
-            String(photoID.uuidString.prefix(2)).lowercased(), isDirectory: true)
-        return (try? FileManager.default.contentsOfDirectory(atPath: bucket.path))?
-            .first(where: { $0.hasPrefix(photoID.uuidString) })
-            .map { bucket.appendingPathComponent($0) }
+        let bucketName = String(photoID.uuidString.prefix(2)).lowercased()
+        let bucket = originalsURL.appendingPathComponent(bucketName, isDirectory: true)
+        if let local = (try? FileManager.default.contentsOfDirectory(atPath: bucket.path))?
+            .first(where: { $0.hasPrefix(photoID.uuidString) && !$0.contains(".live.") }) {
+            return bucket.appendingPathComponent(local)
+        }
+        // 云盘：还没下载的以「.原名.icloud」占位
+        guard let cloudBase = cloud.base else { return nil }
+        let cloudBucket = cloudBase.appendingPathComponent("originals/\(bucketName)", isDirectory: true)
+        return (try? FileManager.default.contentsOfDirectory(atPath: cloudBucket.path))?
+            .map { Self.realURL(forCloudEntry: cloudBucket.appendingPathComponent($0)) }
+            .first { $0.lastPathComponent.hasPrefix(photoID.uuidString) && !$0.lastPathComponent.contains(".live.") }
     }
 
     private func rebuildThumbnail(photoID: UUID, kind: ThumbnailKind) {
         guard let fileURL = originalURL(photoID: photoID) else { return }
+        if Self.isVideoFile(fileURL) {
+            // 视频：封面帧（重建队列是 GCD 串行队列，用同步取帧）
+            guard !FileManager.default.fileExists(atPath: thumbnailURL(photoID: photoID, kind: kind).path),
+                  let frame = Self.posterFrameSync(ofVideoAt: fileURL),
+                  let png = UIImage(cgImage: frame).pngData(),
+                  let source = CGImageSourceCreateWithData(png as CFData, nil)
+            else {
+                return
+            }
+            try? writeThumbnail(from: source, photoID: photoID, kind: kind, width: frame.width, height: frame.height)
+            return
+        }
         let imageSource: CGImageSource? = fileURL.pathExtension.lowercased() == "pdf"
             ? PDFPageStore.shared.firstPagePreviewURL(photoID: photoID)
                 .flatMap { CGImageSourceCreateWithURL($0 as CFURL, nil) }
@@ -399,6 +638,9 @@ final class ImageStore: Sendable {
 
     /// 编辑器的起点：未编辑原图（没编辑过就是当前原图）+ 当前裁剪框
     func editingBase(photoID: UUID) -> EditingBase? {
+        if let original = originalURL(photoID: photoID) {
+            Self.waitUntilDownloaded(original, timeout: 60)
+        }
         guard let url = uneditedOriginalURL(photoID: photoID) ?? originalURL(photoID: photoID),
               let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = Self.orientedImage(from: source, maxPixel: 2048)
@@ -418,6 +660,9 @@ final class ImageStore: Sendable {
     /// 返回新的原图信息（尺寸、扩展名可能变）
     func applyCrop(photoID: UUID, crop: CGRect) throws -> StoredImage {
         let fileManager = FileManager.default
+        if let original = originalURL(photoID: photoID) {
+            Self.waitUntilDownloaded(original, timeout: 60)
+        }
         let full = CGRect(x: 0, y: 0, width: 1, height: 1)
         let isFull = abs(crop.minX) < 0.001 && abs(crop.minY) < 0.001
             && abs(crop.width - 1) < 0.001 && abs(crop.height - 1) < 0.001
@@ -517,11 +762,24 @@ final class ImageStore: Sendable {
     // MARK: - 删除
 
     func deleteFiles(relativePath: String, photoID: UUID) {
-        try? FileManager.default.removeItem(at: url(forRelativePath: relativePath))
+        let original = url(forRelativePath: relativePath)
+        if cloud.base != nil, original.path.hasPrefix(cloud.base!.path) {
+            Self.removeCoordinated(original)
+        } else {
+            try? FileManager.default.removeItem(at: original)
+        }
         for kind in ThumbnailKind.allCases {
             try? FileManager.default.removeItem(at: thumbnailURL(photoID: photoID, kind: kind))
         }
         PDFPageStore.shared.deleteFiles(photoID: photoID)
+        // 实况照片的配套视频
+        let bucket = String(photoID.uuidString.prefix(2)).lowercased()
+        let pair = url(forRelativePath: "originals/\(bucket)/\(photoID.uuidString).live.mov")
+        if cloud.base != nil, pair.path.hasPrefix(cloud.base!.path) {
+            Self.removeCoordinated(pair)
+        } else {
+            try? FileManager.default.removeItem(at: pair)
+        }
         // 裁剪前的原图备份
         if let backup = uneditedOriginalURL(photoID: photoID) {
             try? FileManager.default.removeItem(at: backup)
@@ -550,5 +808,16 @@ final class ImageStore: Sendable {
         let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value ?? 1
         // EXIF 方向 5-8 表示图像需旋转 90°，宽高互换
         return orientation >= 5 ? (height, width) : (width, height)
+    }
+}
+
+/// iCloud 云盘里原图目录的位置（后台定位，读写加锁）
+final class CloudOriginalsLocation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _base: URL?
+
+    var base: URL? {
+        get { lock.withLock { _base } }
+        set { lock.withLock { _base = newValue } }
     }
 }

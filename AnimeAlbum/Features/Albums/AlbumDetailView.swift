@@ -118,7 +118,7 @@ struct AlbumDetailView: View {
         .sheet(isPresented: $showingPicker) {
             AlbumPhotoPickerSheet(album: album)
         }
-        .photosPicker(isPresented: $showingPhotosPicker, selection: $pickerItems, matching: .images)
+        .photosPicker(isPresented: $showingPhotosPicker, selection: $pickerItems, matching: .any(of: [.images, .videos, .livePhotos]))
         .onChange(of: pickerItems) { _, items in
             guard !items.isEmpty else { return }
             pickerItems = []

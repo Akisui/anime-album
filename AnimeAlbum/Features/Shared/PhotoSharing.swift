@@ -6,8 +6,19 @@ import UIKit
 enum PhotoSharing {
     /// sourceRect：窗口坐标里触发分享的位置（iPad 上分享 Sheet 以 popover 从这里弹出）；为 nil 时从屏幕底部中央弹出
     static func share(_ photos: [Photo], sourceRect: CGRect? = nil) {
-        let urls = photos.map { ImageStore.shared.url(forRelativePath: $0.fileRelativePath) }
-            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        // 实况照片连同配套视频一起分享
+        let urls = photos.flatMap { photo in
+            [photo.fileRelativePath] + (photo.pairedVideoRelativePath.map { [$0] } ?? [])
+        }
+            .map { ImageStore.shared.url(forRelativePath: $0) }
+            .filter { url in
+                // iCloud 云盘里还没下载的：发起下载（这次分享不了，下载好后再分享）
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+                    return false
+                }
+                return true
+            }
         guard !urls.isEmpty, let presenter = topViewController() else { return }
         let controller = UIActivityViewController(activityItems: urls, applicationActivities: nil)
         if let popover = controller.popoverPresentationController, let window = presenter.view.window {

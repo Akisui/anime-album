@@ -67,19 +67,52 @@ final class PhotoCollectionCell: UICollectionViewCell {
         }
     }
 
-    /// PDF 显示左下角标记（页数）；图片传 nil
-    func setDocumentPageCount(_ pageCount: Int?) {
+    /// 角标：PDF / 动图在左下角标「PDF · 页数」「GIF」，视频在右下角标时长（原生相册样式）；普通图片传 nil
+    func setBadge(_ badge: CellBadge?) {
         // PDF 页面多为白底，与网格背景融在一起：加一圈细边
-        contentView.layer.borderWidth = pageCount == nil ? 0 : 1 / max(traitCollection.displayScale, 1)
+        var isPDF = false
+        if case .pdf = badge { isPDF = true }
+        contentView.layer.borderWidth = isPDF ? 1 / max(traitCollection.displayScale, 1) : 0
         contentView.layer.borderColor = UIColor.separator.cgColor
-        guard let pageCount else {
+        switch badge {
+        case .pdf(let pages):
+            showChip(pages > 1 ? "PDF · \(pages)" : "PDF")
+            durationLabel?.isHidden = true
+        case .gif:
+            showChip("GIF")
+            durationLabel?.isHidden = true
+        case .video(let duration):
             documentBadge?.isHidden = true
-            return
+            let label = durationLabel ?? makeDurationLabel()
+            label.text = CellBadge.durationText(duration)
+            label.isHidden = false
+        case nil:
+            documentBadge?.isHidden = true
+            durationLabel?.isHidden = true
         }
-        let label = documentBadge ?? makeDocumentBadge()
-        label.text = pageCount > 1 ? "PDF · \(pageCount)" : "PDF"
-        label.isHidden = false
         setNeedsLayout()
+    }
+
+    private func showChip(_ text: String) {
+        let label = documentBadge ?? makeDocumentBadge()
+        label.text = text
+        label.isHidden = false
+    }
+
+    /// 视频时长（右下角，白字带阴影）：懒创建
+    private var durationLabel: UILabel?
+
+    private func makeDurationLabel() -> UILabel {
+        let label = UILabel()
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .white
+        label.layer.shadowColor = UIColor.black.cgColor
+        label.layer.shadowOpacity = 0.5
+        label.layer.shadowRadius = 2
+        label.layer.shadowOffset = .zero
+        contentView.insertSubview(label, belowSubview: tintOverlay)
+        durationLabel = label
+        return label
     }
 
     /// 从查看器落回格子时：照片与过渡图层逐像素一致、无缝衔接；PDF 的细边与页数标记是格子独有的，
@@ -120,6 +153,12 @@ final class PhotoCollectionCell: UICollectionViewCell {
     override func layoutSubviews() {
         super.layoutSubviews()
         let size = contentView.bounds.size
+        if let durationLabel, !durationLabel.isHidden {
+            durationLabel.alpha = size.width >= 48 ? 1 : 0
+            let textSize = durationLabel.intrinsicContentSize
+            durationLabel.frame = CGRect(x: size.width - 5 - textSize.width, y: size.height - 4 - textSize.height,
+                                         width: textSize.width, height: textSize.height)
+        }
         if let documentBadge, !documentBadge.isHidden {
             // 最密档格子太小，不显示
             documentBadge.alpha = size.width >= 48 ? 1 : 0
@@ -332,4 +371,27 @@ final class SelectionBadgeView: UIView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+}
+
+/// 网格格子的角标
+enum CellBadge: Equatable {
+    case pdf(pages: Int)
+    case video(duration: Double)
+    case gif
+
+    static func of(_ photo: Photo) -> CellBadge? {
+        switch photo.kind {
+        case .pdf: .pdf(pages: photo.pageCount)
+        case .video: .video(duration: photo.duration)
+        case .gif: .gif
+        case .image, .live: nil
+        }
+    }
+
+    /// 0:15 / 12:03 / 1:02:03
+    static func durationText(_ seconds: Double) -> String {
+        let total = max(Int(seconds.rounded()), 0)
+        let (h, m, s) = (total / 3600, total / 60 % 60, total % 60)
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
 }

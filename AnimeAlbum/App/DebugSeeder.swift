@@ -69,6 +69,28 @@ enum DebugSeeder {
             AlbumOperations.add(Array(photos.prefix(6)), to: album, in: context)
         }
 
+        // SEED_LIVE=静态图,视频：按实况照片导入一对文件（走与选择器导入相同的存储）
+        if let raw = ProcessInfo.processInfo.environment["SEED_LIVE"],
+           ((try? context.fetch(FetchDescriptor<Photo>())) ?? []).allSatisfy({ $0.kind != .live }) {
+            let parts = raw.split(separator: ",").map { URL(fileURLWithPath: String($0)) }
+            if parts.count == 2, let data = try? Data(contentsOf: parts[0]) {
+                let photoID = UUID()
+                if let stored = try? await ImageStore.shared.storeLivePhoto(photoData: data, videoAt: parts[1], photoID: photoID) {
+                    let photo = Photo()
+                    photo.id = photoID
+                    photo.contentHash = ImageStore.contentHash(of: data)
+                    photo.fileRelativePath = stored.relativePath
+                    photo.width = stored.width
+                    photo.height = stored.height
+                    photo.mediaType = stored.mediaType.rawValue
+                    photo.duration = stored.duration
+                    photo.pairedVideoRelativePath = stored.pairedVideoRelativePath
+                    photo.originalFilename = "实况示例.jpg"
+                    context.insert(photo)
+                }
+            }
+        }
+
         // ALBUM_FILL=1：把图库里所有照片加进第一个相簿（造大相簿，复现首次进入卡顿）
         if ProcessInfo.processInfo.environment["ALBUM_FILL"] == "1",
            let album = (try? context.fetch(FetchDescriptor<Album>(sortBy: [SortDescriptor(\.sortIndex)])))?.first {

@@ -115,6 +115,10 @@ final class PDFPageStore: @unchecked Sendable {
         if let pdfData, let provider = CGDataProvider(data: pdfData as CFData) {
             document = CGPDFDocument(provider)
         } else {
+            // 原 PDF 在 iCloud 云盘、还没下载（其他设备导入的）：后台线程等下载完；主线程上只发起下载、不等（不卡界面）
+            if let url = pdfURL(photoID: photoID) {
+                ImageStore.waitUntilDownloaded(url, timeout: Thread.isMainThread ? 0 : 60)
+            }
             document = pdfURL(photoID: photoID).flatMap { CGPDFDocument($0 as CFURL) }
         }
         guard let document, document.numberOfPages > 0 else { return [] }

@@ -70,7 +70,7 @@ struct LibraryView: View {
             }
             #endif
         }
-        .photosPicker(isPresented: $showingPhotosPicker, selection: $pickerItems, matching: .images)
+        .photosPicker(isPresented: $showingPhotosPicker, selection: $pickerItems, matching: .any(of: [.images, .videos, .livePhotos]))
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: PhotoImporter.importableTypes,

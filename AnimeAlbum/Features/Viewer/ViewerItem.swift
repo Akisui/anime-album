@@ -14,6 +14,12 @@ struct ViewerItem: Identifiable, Hashable {
     let isVectorPage: Bool
     /// 编辑（裁剪）次数：变了就是新的一页，查看器重新加载
     let revision: Int
+    /// 媒体类型：视频 / 动图 / 实况照片在查看器里各自的播放方式
+    var media: Photo.MediaType = .image
+    /// 原文件（相对路径，经 ImageStore 解析，可能在 iCloud 云盘）
+    var filePath = ""
+    /// 实况照片的配套视频
+    var pairedVideoPath: String?
 
     /// 轻量标识（不要拼字符串）：翻页器 / 胶片条每次刷新都要把所有页的 id 算一遍并比较，
     /// 拼字符串在几千张的图库里每次刷新多花几毫秒，翻页时一卡一卡（实测）
@@ -38,7 +44,8 @@ struct ViewerItem: Identifiable, Hashable {
         let photoAspect = photo.height > 0 ? CGFloat(photo.width) / CGFloat(photo.height) : 1
         guard photo.isPDF else {
             return [ViewerItem(photoID: photo.id, page: nil, pageCount: 0, aspectRatio: photoAspect,
-                               isVectorPage: false, revision: photo.editRevision)]
+                               isVectorPage: false, revision: photo.editRevision, media: photo.kind,
+                               filePath: photo.fileRelativePath, pairedVideoPath: photo.pairedVideoRelativePath)]
         }
         let pages = PDFPageStore.shared.pages(photoID: photo.id)
         guard !pages.isEmpty else {
@@ -49,6 +56,14 @@ struct ViewerItem: Identifiable, Hashable {
             ViewerItem(photoID: photo.id, page: index, pageCount: pages.count, aspectRatio: info.aspectRatio,
                        isVectorPage: info.kind == .vector, revision: photo.editRevision)
         }
+    }
+
+    var fileURL: URL {
+        ImageStore.shared.url(forRelativePath: filePath)
+    }
+
+    var pairedVideoURL: URL? {
+        pairedVideoPath.map { ImageStore.shared.url(forRelativePath: $0) }
     }
 
     // MARK: 图片

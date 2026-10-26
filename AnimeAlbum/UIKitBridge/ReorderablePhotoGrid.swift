@@ -261,7 +261,7 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
             let cellRegistration = UICollectionView.CellRegistration<PhotoCollectionCell, UUID> {
                 [weak self] cell, _, photoID in
                 cell.configure(photoID: photoID, kind: self?.thumbnailKind ?? .small)
-                cell.setDocumentPageCount(self?.documentPageCounts[photoID])
+                cell.setBadge(self?.badges[photoID])
                 cell.setChecked(self?.isChecked(photoID) ?? false, animated: false)
                 cell.isHidden = photoID == self?.hiddenPhotoID
             }
@@ -288,12 +288,13 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
             }
         }
 
-        /// PDF 的页数（格子左下角标记用）
-        private var documentPageCounts: [UUID: Int] = [:]
+        /// 格子角标（PDF 页数、视频时长、GIF）
+        private var badges: [UUID: CellBadge] = [:]
 
         func update(photos: [Photo]) {
-            documentPageCounts = Dictionary(
-                photos.lazy.filter(\.isPDF).map { ($0.id, $0.pageCount) }, uniquingKeysWith: { first, _ in first })
+            badges = Dictionary(
+                photos.compactMap { photo in CellBadge.of(photo).map { (photo.id, $0) } },
+                uniquingKeysWith: { first, _ in first })
             aspectRatios = photos.map { $0.height > 0 ? CGFloat($0.width) / CGFloat($0.height) : 1 }
             if let aspectLayout = collectionView?.collectionViewLayout as? PhotoAspectListLayout,
                aspectLayout.aspectRatios != aspectRatios {
@@ -336,14 +337,16 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
 
         /// 「N 张照片、M 个 PDF」
         private var footerText: String {
+            // 「N 张照片、M 个视频、K 个 PDF」（没有的那类不写；全空时写 0 张照片）
             let total = dataSource.snapshot().numberOfItems
-            let documents = documentPageCounts.count
-            let images = total - documents
-            switch (images, documents) {
-            case (_, 0): return "\(images) 张照片"
-            case (0, _): return "\(documents) 个 PDF"
-            default: return "\(images) 张照片、\(documents) 个 PDF"
-            }
+            let documents = badges.values.filter { if case .pdf = $0 { true } else { false } }.count
+            let videos = badges.values.filter { if case .video = $0 { true } else { false } }.count
+            let images = total - documents - videos
+            var parts: [String] = []
+            if images > 0 || (videos == 0 && documents == 0) { parts.append("\(images) 张照片") }
+            if videos > 0 { parts.append("\(videos) 个视频") }
+            if documents > 0 { parts.append("\(documents) 个 PDF") }
+            return parts.joined(separator: "、")
         }
 
         private var hiddenPhotoID: UUID?

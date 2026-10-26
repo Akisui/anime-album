@@ -62,14 +62,46 @@ struct ZoomableImageView: UIViewRepresentable {
             coordinator.tiledView = tiled
         }
 
+        // 视频 / 实况照片：播放层叠在封面图上、随图片一起布局；视频不缩放
+        switch item.media {
+        case .video:
+            scrollView.maximumZoomScale = 1
+            let video = VideoPlaybackView(url: item.fileURL)
+            video.frame = imageView.bounds
+            video.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            imageView.isUserInteractionEnabled = true
+            imageView.addSubview(video)
+            coordinator.videoView = video
+        case .live:
+            if let pair = item.pairedVideoURL {
+                let live = LivePhotoPlaybackView(photoURL: item.fileURL, videoURL: pair,
+                                                 placeholder: item.cachedImage(.large) ?? item.cachedImage(.small))
+                live.frame = imageView.bounds
+                live.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                imageView.isUserInteractionEnabled = true
+                imageView.addSubview(live)
+                coordinator.liveView = live
+            }
+        case .gif:
+            coordinator.animatedImage = AnimatedImagePlayer(url: item.fileURL, imageView: imageView)
+        case .image, .pdf:
+            break
+        }
+
         coordinator.loadImage(item: item)
+        coordinator.updatePlayback(isCurrent: isCurrent)
         return scrollView
     }
 
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.updatePlayback(isCurrent: isCurrent)
         // 注意：不能在 isCurrent 变化（滑动过半）时复位缩放 —— 原生语义是
         // 页面完全滑出屏幕才复位；由 Coordinator 监听分页容器滚动实现
+    }
+
+    static func dismantleUIView(_ scrollView: UIScrollView, coordinator: Coordinator) {
+        coordinator.updatePlayback(isCurrent: false)
     }
 
     @MainActor
@@ -79,6 +111,24 @@ struct ZoomableImageView: UIViewRepresentable {
         weak var imageView: UIImageView?
         /// PDF 矢量页的分块重绘层（放大后才显示）
         weak var tiledView: UIView?
+        /// 视频 / 实况照片 / 动图的播放
+        weak var videoView: VideoPlaybackView?
+        weak var liveView: LivePhotoPlaybackView?
+        var animatedImage: AnimatedImagePlayer?
+        private var playbackIsCurrent: Bool?
+
+        /// 当前页才播动图；翻走时暂停视频、停实况照片
+        func updatePlayback(isCurrent: Bool) {
+            guard playbackIsCurrent != isCurrent else { return }
+            playbackIsCurrent = isCurrent
+            if isCurrent {
+                animatedImage?.start()
+            } else {
+                animatedImage?.stop()
+                videoView?.pause()
+                liveView?.stopPlayback()
+            }
+        }
         private var loadTask: Task<Void, Never>?
         /// PDF 扫描页放大后换上的原图（只换一次）
         private var fullImageRequested = false

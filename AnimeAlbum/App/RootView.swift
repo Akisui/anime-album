@@ -6,6 +6,7 @@ enum RootTab: Hashable {
     case albums
     /// iPad 侧栏里的单个相簿（DESIGN.md §6.6：侧栏列出图库 / 各相簿）
     case album(UUID)
+    case settings
 }
 
 struct RootView: View {
@@ -23,6 +24,9 @@ struct RootView: View {
         // 调试辅助：INITIAL_TAB=albums 直接落在相簿页，方便自动化截图
         if ProcessInfo.processInfo.environment["INITIAL_TAB"] == "albums" {
             return .albums
+        }
+        if ProcessInfo.processInfo.environment["INITIAL_TAB"] == "settings" {
+            return .settings
         }
         #endif
         return .library
@@ -58,6 +62,9 @@ struct RootView: View {
                     }
                 }
                 .defaultVisibility(.hidden, for: .tabBar)
+            }
+            Tab("设置", systemImage: "gearshape", value: RootTab.settings) {
+                SettingsView()
             }
         }
         // iPad 上自动转为侧栏（与原生相册的双形态一致）
