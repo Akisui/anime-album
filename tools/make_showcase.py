@@ -350,7 +350,42 @@ def journal_pdf(rng, path, cover):
     pages[0].save(path, save_all=True, append_images=pages[1:], resolution=150)
 
 
-def main(out):
+def random_palette(rng):
+    """随机一套天色 / 山色"""
+    hue = rng.random()
+    import colorsys
+    def c(h, s, v):
+        r, g, b = colorsys.hsv_to_rgb(h % 1, s, v)
+        return (int(r * 255), int(g * 255), int(b * 255))
+    sky = [(0, c(hue, 0.55, 0.55)), (0.55, c(hue + 0.08, 0.45, 0.95)), (1, c(hue + 0.15, 0.3, 1))]
+    sun = (c(hue + 0.12, 0.15, 1), c(hue + 0.1, 0.45, 1))
+    layers = [c(hue - 0.05, 0.35, 0.7), c(hue - 0.08, 0.45, 0.5), c(hue - 0.1, 0.55, 0.32)]
+    return sky, sun, layers
+
+
+def extras(rng, count):
+    """iPad 展示图要铺满大屏：再来一批随机配色的风景 / 插画"""
+    sizes = [PORTRAIT, LANDSCAPE, SQUARE]
+    for i in range(count):
+        size = sizes[i % 3]
+        kind = i % 4
+        if kind == 0:
+            sky, sun, layers = random_palette(rng)
+            yield f"extra-{i + 1:02d}.jpg", mountains(rng, size, sky, sun, layers, (rng.uniform(0.2, 0.8), rng.uniform(0.25, 0.45)))
+        elif kind == 1:
+            sky, sun, layers = random_palette(rng)
+            yield f"extra-{i + 1:02d}.jpg", lake(rng, size, dict(sky=sky, sun=sun, hills=layers, water=layers[0]))
+        elif kind == 2:
+            import colorsys
+            hue = rng.random()
+            cols = [tuple(int(v * 255) for v in colorsys.hsv_to_rgb((hue + k * 0.17) % 1, 0.45 if k == 0 else 0.6,
+                                                                       0.98 if k == 0 else 0.95)) for k in range(4)]
+            yield f"extra-{i + 1:02d}.jpg", abstract(rng, size, cols)
+        else:
+            yield f"extra-{i + 1:02d}.jpg", night(rng, size) if rng.random() < 0.5 else city(rng, size)
+
+
+def main(out, extra=0):
     rng = random.Random(42)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
@@ -366,8 +401,21 @@ def main(out):
     docs = os.path.join(out, "4-文档")
     os.makedirs(docs)
     journal_pdf(rng, os.path.join(docs, "旅行手账.pdf"), [made["seaside.jpg"], made["lake.jpg"], made["dunes.jpg"]])
+    # 「收藏」：除隐藏的那张外全部照片（导入时按内容去重，只是同时加进这个相簿），截相簿里拖动排序用
+    favorites = os.path.join(out, "0-收藏")
+    os.makedirs(favorites)
+    for album in ("1-旅行", "2-风景", "3-插画"):
+        for name in sorted(os.listdir(os.path.join(out, album))):
+            if not name.startswith("hidden-"):
+                shutil.copy(os.path.join(out, album, name), os.path.join(favorites, name))
+    if extra:
+        folder = os.path.join(out, "5-随拍")
+        os.makedirs(folder)
+        for name, img in extras(rng, extra):
+            img.save(os.path.join(folder, name), quality=88)
     print("done", out)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    # 第二个参数：额外生成多少张（iPad 展示图要铺满大屏）
+    main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 0)

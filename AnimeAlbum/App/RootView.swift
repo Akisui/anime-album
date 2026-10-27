@@ -200,6 +200,43 @@ struct RootView: View {
             try? await Task.sleep(for: .seconds(delay))
             selectedTab = .albums
         }
+        // SHOW_SIDEBAR=1：1s 后把 iPad 侧栏设为显示（不靠点按开关 —— 开关状态会被系统记住，点一下可能反而关上）
+        if env["SHOW_SIDEBAR"] == "1" {
+            try? await Task.sleep(for: .seconds(1))
+            let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+            func find(_ vc: UIViewController?) -> UITabBarController? {
+                guard let vc else { return nil }
+                if let tab = vc as? UITabBarController { return tab }
+                for child in vc.children { if let found = find(child) { return found } }
+                return nil
+            }
+            if let tab = windows.compactMap({ find($0.rootViewController) }).first {
+                tab.sidebar.isHidden = false
+            }
+        }
+        // DUMP_SIDEBAR=1：6s 后打印 iPad 侧栏的视图结构（找相簿行的位置用）
+        if env["DUMP_SIDEBAR"] == "1" {
+            try? await Task.sleep(for: .seconds(6))
+            for window in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).flatMap(\.windows) {
+                func walk(_ view: UIView, _ chain: [String]) {
+                    let name = String(describing: type(of: view))
+                    let next = chain + [name]
+                    let text = (view as? UILabel)?.text ?? view.accessibilityLabel ?? ""
+                    if ["收藏", "旅行", "风景", "我的相簿"].contains(text) {
+                        print("SIDEBAR_LABEL \(text) frame=\(view.convert(view.bounds, to: nil).integral) chain=\(next.suffix(9).joined(separator: ">"))")
+                    }
+                    if view is UICollectionViewCell, !(view is PhotoCollectionCell) {
+                        let frame = view.convert(view.bounds, to: nil)
+                        print("SIDEBAR_CELL \(view.accessibilityLabel ?? "-") frame=\(frame.integral) chain=\(next.suffix(6).joined(separator: ">"))")
+                    }
+                    if name.contains("Sidebar") {
+                        print("SIDEBAR_VIEW \(name) frame=\(view.convert(view.bounds, to: nil).integral)")
+                    }
+                    view.subviews.forEach { walk($0, next) }
+                }
+                walk(window, [])
+            }
+        }
         if env["AUTO_NEW_ALBUM"] == "1" {
             try? await Task.sleep(for: .seconds(1.5))
             commandCenter.newAlbumRequested = true

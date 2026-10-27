@@ -21,6 +21,38 @@ enum AlbumOperations {
         return album
     }
 
+    /// iPad 侧栏里列出的相簿（与 RootView 侧栏同一套过滤、同序）
+    static func sidebarAlbums(in context: ModelContext, filter: HiddenFilter) -> [SidebarAlbum] {
+        ((try? context.fetch(FetchDescriptor<Album>(sortBy: [SortDescriptor(\.sortIndex)]))) ?? [])
+            .filter { filter.includes(isHidden: $0.isHidden) }
+            .map { SidebarAlbum(id: $0.id, name: $0.name) }
+    }
+
+    static func album(id: UUID, in context: ModelContext) -> Album? {
+        var descriptor = FetchDescriptor<Album>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return (try? context.fetch(descriptor))?.first
+    }
+
+    static func photo(id: UUID, in context: ModelContext) -> Photo? {
+        var descriptor = FetchDescriptor<Photo>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return (try? context.fetch(descriptor))?.first
+    }
+
+    static func contains(photoID: UUID, albumID: UUID, in context: ModelContext) -> Bool {
+        let descriptor = FetchDescriptor<AlbumEntry>(
+            predicate: #Predicate { $0.photo?.id == photoID && $0.album?.id == albumID })
+        return ((try? context.fetchCount(descriptor)) ?? 0) > 0
+    }
+
+    /// 侧栏拖放：把一张照片加入相簿（已在里面的跳过）
+    static func add(photoID: UUID, toAlbumID albumID: UUID, in context: ModelContext) {
+        guard let photo = photo(id: photoID, in: context), let album = album(id: albumID, in: context) else { return }
+        add([photo], to: album, in: context)
+        try? context.save()
+    }
+
     /// 追加到相簿末尾（已在相簿里的跳过），返回实际新加入的张数
     @discardableResult
     static func add(_ photos: [Photo], to album: Album, in context: ModelContext) -> Int {

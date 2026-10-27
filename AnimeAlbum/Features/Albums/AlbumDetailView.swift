@@ -233,6 +233,14 @@ struct AlbumDetailView: View {
                 isSelecting: isSelecting,
                 selectedIDs: $selectedIDs,
                 marksHidden: filter == .all,
+                sidebarAlbums: { AlbumOperations.sidebarAlbums(in: modelContext, filter: privacyLock.filter(for: .albums)) },
+                canAddToAlbum: { photoID, albumID in
+                    // 自己所在的相簿、已经在里面的相簿：不能加
+                    albumID != album.id && !AlbumOperations.contains(photoID: photoID, albumID: albumID, in: modelContext)
+                },
+                onAddToAlbum: { photoID, albumID in
+                    AlbumOperations.add(photoID: photoID, toAlbumID: albumID, in: modelContext)
+                },
                 contentKey: filter
             )
         }

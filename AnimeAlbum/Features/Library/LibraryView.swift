@@ -162,6 +162,13 @@ private struct LibraryPage: View {
                 allowsReordering: false,
                 anchorsToBottom: true,
                 marksHidden: filter == .all,
+                sidebarAlbums: { AlbumOperations.sidebarAlbums(in: modelContext, filter: privacyLock.filter(for: .albums)) },
+                canAddToAlbum: { photoID, albumID in
+                    !AlbumOperations.contains(photoID: photoID, albumID: albumID, in: modelContext)
+                },
+                onAddToAlbum: { photoID, albumID in
+                    AlbumOperations.add(photoID: photoID, toAlbumID: albumID, in: modelContext)
+                },
                 contentKey: filter
             )
             // 照片滚到导航栏 / Tab 栏下方（材质透出内容）；UIKit 按 adjustedContentInset 让出首末行

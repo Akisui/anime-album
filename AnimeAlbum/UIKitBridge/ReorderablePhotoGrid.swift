@@ -28,6 +28,11 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
     var anchorsToBottom = false
     /// 给隐藏的照片打标记（显示选项为「全部显示」时）
     var marksHidden = false
+    /// iPad 侧栏拖放：侧栏里列出的相簿（与侧栏同序，空 = 不支持）；拖到能加入的相簿上松手 = 加入（见 SidebarAlbumDrop.swift）
+    var sidebarAlbums: () -> [SidebarAlbum] = { [] }
+    /// 这张照片能否加入那个相簿（已在里面的不能：不显示「+」、松手不加）
+    var canAddToAlbum: (UUID, UUID) -> Bool = { _, _ in false }
+    var onAddToAlbum: (UUID, UUID) -> Void = { _, _ in }
     /// 内容标识（显示选项）：变了就整块交叉淡化换成新内容，而不是逐格增删 —— 逐格增删时几十张同时淡出、
     /// 其余斜着补位，贴底的图库还跟着滚，很乱（用户反馈）
     var contentKey: AnyHashable?
@@ -111,6 +116,27 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
                 }
             }
         }
+        // SIDEBAR_DROP=n:相簿名[:back]：2.5s 后长按第 n 张、拖到侧栏那个相簿上停 0.6s 再松手（back：拖过去再拖回网格松手），
+        // 走与真实手势相同的处理（idb 做不出「按住不动再拖」的组合手势）
+        if let raw = ProcessInfo.processInfo.environment["SIDEBAR_DROP"] {
+            let parts = raw.split(separator: ":").map(String.init)
+            if parts.count >= 2, let index = Int(parts[0]) {
+                Task { @MainActor [weak coordinator] in
+                    try? await Task.sleep(for: .seconds(2.5))
+                    coordinator?.debugSidebarDrop(index: index, albumName: parts[1], returnToGrid: parts.count > 2)
+                }
+            }
+        }
+        // SHOWCASE_DRAG=a-b：2s 后真实地长按第 a 张、拖到第 b 张附近停住不松手（截展示图：拖动排序中的样子）
+        if let raw = ProcessInfo.processInfo.environment["SHOWCASE_DRAG"] {
+            let bounds = raw.split(separator: "-").compactMap { Int($0) }
+            if bounds.count == 2 {
+                Task { @MainActor [weak coordinator] in
+                    try? await Task.sleep(for: .seconds(2))
+                    coordinator?.debugShowcaseDrag(from: bounds[0], to: bounds[1])
+                }
+            }
+        }
         // AUTO_HOLD=n：2s 后模拟长按第 n 张并按住不动（带 ±1pt 手指抖动），逐帧打印照片显示尺寸（验证浮起 → 等菜单 → 菜单预览连续放大）
         if let index = ProcessInfo.processInfo.environment["AUTO_HOLD"].flatMap(Int.init) {
             Task { @MainActor [weak coordinator] in
@@ -166,7 +192,27 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
             /// 格子中心相对手指的偏移：拖动时保持抓取位置不变
             let grabOffset: CGPoint
             var isMoving = false
+            var photoID: UUID?
         }
+
+        /// iPad 侧栏拖放：拖动中浮在最上层的照片（图库从一开始拖就是它；相簿里手指出了网格才换成它）
+        struct SidebarDrag {
+            let photoID: UUID
+            let ghost: DragGhostView
+            let highlight: SidebarDropHighlightView
+            /// 浮层中心相对手指的偏移（窗口坐标）
+            let grabOffset: CGPoint
+            weak var sourceCell: PhotoCollectionCell?
+            var hovered: SidebarAlbumTargets.Target?
+            var hoveredIsValid = false
+        }
+
+        var sidebarDrag: SidebarDrag?
+        /// 这次长按时侧栏里可放入的相簿行（震动时找一次）；空 = 侧栏没显示 / 不支持
+        var pressTargets: [SidebarAlbumTargets.Target] = [] {
+            didSet { pressSidebarFrame = SidebarAlbumTargets.sidebarFrame(of: pressTargets) }
+        }
+        private(set) var pressSidebarFrame: CGRect = .null
 
         weak var reorderRecognizer: UILongPressGestureRecognizer?
         var reorderPress: ReorderPress?
@@ -1051,8 +1097,9 @@ extension ReorderablePhotoGrid.Coordinator {
             return
         }
         preLiftWork?.cancel()
-        // 能排序又有菜单（相簿）：震动后还要按住等菜单 —— 浮起与按住放大接成一条曲线，震动处不停顿
-        let continuesToHold = canReorder && hasMenu(at: indexPath)
+        // 能排序又有菜单（相簿）：震动后还要按住等菜单 —— 浮起与按住放大接成一条曲线，震动处不停顿。
+        // iPad 侧栏显示着时图库也是「震动后可拖到侧栏、不动才弹菜单」
+        let continuesToHold = (canReorder || !sidebarTargets().isEmpty) && hasMenu(at: indexPath)
         // 稍等一下再开始（快速轻点只是打开照片，不该闪一下），在长按识别的那一刻正好完全拿起 ——
         // 时长按「按下时刻 + 识别时长」现算：延迟任务常晚到一帧，固定时长会在震动时还没浮起完、被进入拖动直接设成 1.1 倍而跳一下
         let recognizeTime = CACurrentMediaTime() + Self.liftDuration
@@ -1106,13 +1153,24 @@ extension ReorderablePhotoGrid.Coordinator {
     func beginPress(at indexPath: IndexPath, location: CGPoint) {
         guard let collectionView, let cell = collectionView.cellForItem(at: indexPath) else { return }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        pressTargets = sidebarTargets()
+        let photoID = dataSource.itemIdentifier(for: indexPath)
         guard canReorder else {
-            // 图库（不能排序）：震动即弹菜单
-            presentMenu(for: indexPath)
+            guard !pressTargets.isEmpty else {
+                // 图库（不能排序、侧栏没显示）：震动即弹菜单
+                presentMenu(for: indexPath)
+                return
+            }
+            // 图库 + iPad 侧栏：照片可以拖（拖到侧栏的相簿 = 加入），但不换位置；手指不动才弹菜单
+            reorderPress = ReorderPress(indexPath: indexPath, start: location,
+                                        grabOffset: CGPoint(x: cell.center.x - location.x, y: cell.center.y - location.y),
+                                        photoID: photoID)
+            scheduleMenu(for: indexPath)
             return
         }
         var press = ReorderPress(indexPath: indexPath, start: location,
-                                 grabOffset: CGPoint(x: cell.center.x - location.x, y: cell.center.y - location.y))
+                                 grabOffset: CGPoint(x: cell.center.x - location.x, y: cell.center.y - location.y),
+                                 photoID: photoID)
         // 一震动就进入拖动：此刻照片已完全浮起（与移动中的布局属性同为 1.1 倍 + 投影，交接无跳变）
         if collectionView.beginInteractiveMovementForItem(at: indexPath) {
             press.isMoving = true
@@ -1125,12 +1183,38 @@ extension ReorderablePhotoGrid.Coordinator {
     }
 
     func movePress(to location: CGPoint) {
-        guard let collectionView, let press = reorderPress, press.isMoving else { return }
-        if menuWork != nil, hypot(location.x - press.start.x, location.y - press.start.y) > 8 {
+        guard let collectionView, let press = reorderPress else { return }
+        let moved = hypot(location.x - press.start.x, location.y - press.start.y) > 8
+        if menuWork != nil, moved {
             // 手指动了：是拖动，不再弹菜单；照片退回拖动时的 1.1 倍
             menuWork?.cancel()
             menuWork = nil
             (preLiftCell as? PhotoCollectionCell)?.setPressScale(PhotoCollectionCell.liftedScale, duration: 0.2)
+        }
+        let finger = collectionView.convert(location, to: nil)
+        guard press.isMoving else {
+            // 图库 + 侧栏：手指一动就拿起浮层，跟着手指走（其他照片不动）
+            guard !pressTargets.isEmpty, moved || sidebarDrag != nil else { return }
+            if sidebarDrag == nil {
+                startSidebarDrag(photoID: press.photoID, finger: finger)
+            }
+            moveSidebarDrag(finger: finger)
+            return
+        }
+        // 相簿：网格里照常排序；手指出了网格（到侧栏上）换成浮层，网格里的空位退回原处
+        if !pressTargets.isEmpty, pressSidebarFrame.contains(finger) || !gridFrameInWindow.contains(finger) {
+            if sidebarDrag == nil {
+                stopReorderAutoScroll()
+                startSidebarDrag(photoID: press.photoID, finger: finger)
+                collectionView.updateInteractiveMovementTargetPosition(
+                    CGPoint(x: press.start.x + press.grabOffset.x, y: press.start.y + press.grabOffset.y))
+            }
+            moveSidebarDrag(finger: finger)
+            return
+        }
+        if sidebarDrag != nil {
+            // 回到网格：收起浮层，接着在网格里排序
+            cancelSidebarDragGhost()
         }
         collectionView.updateInteractiveMovementTargetPosition(
             CGPoint(x: location.x + press.grabOffset.x, y: location.y + press.grabOffset.y))
@@ -1164,8 +1248,10 @@ extension ReorderablePhotoGrid.Coordinator {
         menuWork?.cancel()
         menuWork = nil
         stopReorderAutoScroll()
+        let droppedOnSidebar = sidebarDrag != nil
         if let press = reorderPress, press.isMoving {
-            if commit {
+            // 手指在侧栏上松手：网格里的顺序不变（空位已退回原处）
+            if commit, !droppedOnSidebar {
                 collectionView?.endInteractiveMovement()
             } else {
                 collectionView?.cancelInteractiveMovement()
@@ -1173,10 +1259,117 @@ extension ReorderablePhotoGrid.Coordinator {
         }
         reorderPress = nil
         if let cell = preLiftCell, !contextMenuActive {
-            setLifted(false, cell: cell, duration: 0.2)
+            setLifted(false, cell: cell, duration: droppedOnSidebar ? 0 : 0.2)
         }
         preLiftCell = nil
+        if droppedOnSidebar {
+            finishSidebarDrag(commit: commit)
+        }
+        pressTargets = []
     }
+
+    // MARK: iPad 侧栏拖放
+
+    /// 侧栏里可放入的相簿行（只在 iPad 宽屏、侧栏显示着时有）
+    private func sidebarTargets() -> [SidebarAlbumTargets.Target] {
+        guard let collectionView, let window = collectionView.window,
+              collectionView.traitCollection.horizontalSizeClass == .regular
+        else {
+            return []
+        }
+        let albums = parent.sidebarAlbums()
+        guard !albums.isEmpty else { return [] }
+        return SidebarAlbumTargets.find(in: window, albums: albums)
+    }
+
+    /// 网格可见区域（窗口坐标）：手指出了这里就是在侧栏 / 网格外
+    private var gridFrameInWindow: CGRect {
+        guard let collectionView else { return .zero }
+        let visible = collectionView.bounds.inset(by: collectionView.adjustedContentInset)
+        return collectionView.convert(visible, to: nil)
+    }
+
+    private func photoCell(for photoID: UUID?) -> PhotoCollectionCell? {
+        guard let photoID else { return nil }
+        return collectionView?.visibleCells.lazy.compactMap { $0 as? PhotoCollectionCell }.first { $0.photoID == photoID }
+    }
+
+    /// 拿起浮层：从格子当前（浮起后）的样子接手，格子留空
+    private func startSidebarDrag(photoID: UUID?, finger: CGPoint) {
+        guard let photoID, let window = collectionView?.window, let cell = photoCell(for: photoID) else { return }
+        let scale = cell.displayedPressScale
+        let base = cell.convert(cell.bounds, to: window)
+        let frame = base.insetBy(dx: base.width * (1 - scale) / 2, dy: base.height * (1 - scale) / 2)
+        let ghost = DragGhostView(image: cell.currentImage, frame: frame)
+        let highlight = SidebarDropHighlightView()
+        window.addSubview(highlight)
+        window.addSubview(ghost)
+        cell.isHiddenForMenu = true
+        sidebarDrag = SidebarDrag(photoID: photoID, ghost: ghost, highlight: highlight,
+                                  grabOffset: CGPoint(x: frame.midX - finger.x, y: frame.midY - finger.y),
+                                  sourceCell: cell)
+    }
+
+    private func moveSidebarDrag(finger: CGPoint) {
+        guard var drag = sidebarDrag else { return }
+        UIView.performWithoutAnimation {
+            drag.ghost.center = CGPoint(x: finger.x + drag.grabOffset.x, y: finger.y + drag.grabOffset.y)
+        }
+        let target = pressTargets.first { $0.frame.contains(finger) }
+        let valid = target.map { parent.canAddToAlbum(drag.photoID, $0.albumID) } ?? false
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SIDEBAR_DROP"] != nil {
+            print("SIDEBAR_MOVE finger=\(Int(finger.x)),\(Int(finger.y)) ghost=\(Int(drag.ghost.center.x)),\(Int(drag.ghost.center.y)) target=\(target.map { "\($0.frame.integral)" } ?? "-") valid=\(valid)")
+        }
+        #endif
+        if drag.hovered?.albumID != target?.albumID || drag.hoveredIsValid != valid {
+            drag.highlight.show(on: valid ? target?.frame.insetBy(dx: -4, dy: 0) : nil)
+            drag.hovered = target
+            drag.hoveredIsValid = valid
+        }
+        drag.ghost.setDropping(valid)
+        sidebarDrag = drag
+    }
+
+    /// 回到网格（相簿里接着排序）：收起浮层、格子重新显示
+    private func cancelSidebarDragGhost() {
+        guard let drag = sidebarDrag else { return }
+        drag.highlight.removeFromSuperview()
+        drag.ghost.removeFromSuperview()
+        drag.sourceCell?.isHiddenForMenu = false
+        sidebarDrag = nil
+    }
+
+    /// 松手：在能加入的相簿上 → 加入、浮层飞进那一行；否则 → 落回格子原位
+    private func finishSidebarDrag(commit: Bool) {
+        guard let drag = sidebarDrag else { return }
+        sidebarDrag = nil
+        let highlight = drag.highlight
+        UIView.animate(withDuration: 0.25, delay: 0.15) {
+            highlight.alpha = 0
+        } completion: { _ in
+            highlight.removeFromSuperview()
+        }
+        let source = drag.sourceCell
+        if commit, drag.hoveredIsValid, let target = drag.hovered {
+            parent.onAddToAlbum(drag.photoID, target.albumID)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            source?.isHiddenForMenu = false
+            drag.ghost.fly(into: target.frame) {}
+            return
+        }
+        collectionView?.layoutIfNeeded()
+        let cell = photoCell(for: drag.photoID) ?? source
+        guard let cell, let window = collectionView?.window else {
+            drag.ghost.removeFromSuperview()
+            source?.isHiddenForMenu = false
+            return
+        }
+        drag.ghost.fly(back: cell.convert(cell.bounds, to: window)) {
+            cell.isHiddenForMenu = false
+        }
+    }
+
 
     // MARK: 菜单
 
@@ -1274,6 +1467,86 @@ extension ReorderablePhotoGrid.Coordinator {
     }
 
     #if DEBUG
+    /// SIDEBAR_DROP 调试：按下 → 浮起 → 震动 → 0.8s 拖到侧栏相簿行 → 停 0.6s →（拖回网格）→ 松手
+    func debugSidebarDrop(index: Int, albumName: String, returnToGrid: Bool) {
+        guard let collectionView, let window = collectionView.window,
+              let cell = collectionView.cellForItem(at: IndexPath(item: index, section: 0))
+        else {
+            return
+        }
+        let start = cell.center
+        pressDidTouchDown(at: start)
+        let begin = CACurrentMediaTime()
+        var began = false
+        var end = start
+        let link = DebugDisplayLink { [weak self] link in
+            guard let self else { link.stop(); return }
+            let t = CACurrentMediaTime() - begin
+            if !began {
+                guard t >= Self.liftDuration else { return }
+                began = true
+                self.beginPress(at: IndexPath(item: index, section: 0), location: start)
+                let albums = self.parent.sidebarAlbums()
+                let target = self.pressTargets.first { target in albums.first { $0.id == target.albumID }?.name == albumName }
+                print("SIDEBAR_DROP targets=\(self.pressTargets.count) found=\(target != nil) frames=\(self.pressTargets.map { $0.frame.integral })")
+                if let target {
+                    end = collectionView.convert(CGPoint(x: target.frame.midX, y: target.frame.midY), from: window)
+                }
+                return
+            }
+            let moveStart = Self.liftDuration + 0.1
+            let u = min(max((t - moveStart) / 0.8, 0), 1)
+            let eased = u < 0.5 ? 2 * u * u : 1 - pow(-2 * u + 2, 2) / 2
+            var point = CGPoint(x: start.x + (end.x - start.x) * eased, y: start.y + (end.y - start.y) * eased)
+            if returnToGrid, t > moveStart + 1.4 {
+                let v = min((t - moveStart - 1.4) / 0.6, 1)
+                point = CGPoint(x: end.x + (start.x - 230 - end.x) * v, y: end.y + (start.y + 115 - end.y) * v)
+            }
+            if t > moveStart - 0.05 {
+                self.movePress(to: point)
+            }
+            let releaseAt = moveStart + (returnToGrid ? 2.3 : 1.4)
+            if t >= releaseAt {
+                link.stop()
+                print("SIDEBAR_DROP release at \(point)")
+                self.endReorder(commit: true)
+                self.pressDidReset()
+            }
+        }
+        link.start()
+    }
+
+    /// SHOWCASE_DRAG 调试：真实地长按、拖到目标格附近停住（截展示图）
+    func debugShowcaseDrag(from index: Int, to target: Int) {
+        guard let collectionView,
+              let cell = collectionView.cellForItem(at: IndexPath(item: index, section: 0)),
+              let goal = collectionView.layoutAttributesForItem(at: IndexPath(item: target, section: 0))
+        else {
+            return
+        }
+        let start = cell.center
+        // 停在目标格偏右上一点：看得出正在拖动，而不是已经放下
+        let end = CGPoint(x: goal.center.x + goal.size.width * 0.32, y: goal.center.y - goal.size.height * 0.22)
+        pressDidTouchDown(at: start)
+        let begin = CACurrentMediaTime()
+        var began = false
+        let link = DebugDisplayLink { [weak self] link in
+            guard let self else { link.stop(); return }
+            let t = CACurrentMediaTime() - begin
+            if !began {
+                guard t >= Self.liftDuration else { return }
+                began = true
+                self.beginPress(at: IndexPath(item: index, section: 0), location: start)
+                return
+            }
+            let u = min(max((t - Self.liftDuration) / 0.6, 0), 1)
+            let eased = 1 - pow(1 - u, 3)
+            self.movePress(to: CGPoint(x: start.x + (end.x - start.x) * eased, y: start.y + (end.y - start.y) * eased))
+            if u >= 1 { link.stop() }
+        }
+        link.start()
+    }
+
     /// AUTO_HOLD 调试：按下 → 0.3s 识别 → 按住不动（每帧 ±1pt 抖动，同真机手指）直到菜单弹出；
     /// 逐帧打印照片在屏幕上的显示宽度（格子按 presentation 层换算，菜单出现后改量预览）
     func debugHold(index: Int) {
