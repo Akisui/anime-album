@@ -50,6 +50,10 @@ struct SettingsView: View {
                         AboutView()
                     }
                 }
+
+                #if DEBUG
+                PushDiagnosticsSection()
+                #endif
             }
             .navigationTitle("设置")
         }
@@ -157,3 +161,30 @@ private struct LegalTextView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 }
+
+#if DEBUG
+/// 调试版：点进相簿时的推入诊断（见 PushDiagnostics）
+private struct PushDiagnosticsSection: View {
+    private let diagnostics = PushDiagnostics.shared
+
+    var body: some View {
+        Section {
+            NavigationLink("推入诊断（\(diagnostics.lines.count) 条）") {
+                List {
+                    ForEach(Array(diagnostics.lines.enumerated().reversed()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.caption.monospaced())
+                    }
+                }
+                .navigationTitle("推入诊断")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    Button("清空") { diagnostics.clear() }
+                }
+            }
+        } header: {
+            Text("调试")
+        }
+    }
+}
+#endif

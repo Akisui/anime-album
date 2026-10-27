@@ -10,6 +10,7 @@ struct AnimeAlbumApp: App {
 
     init() {
         #if DEBUG
+        _ = PushDiagnostics.shared
         // ICLOUD_ON=1：当作同步开关已打开启动（验证 iCloud 不可用时退回纯本地）
         if ProcessInfo.processInfo.environment["ICLOUD_ON"] == "1" {
             UserDefaults.standard.set(true, forKey: CloudSyncSettings.enabledKey)

@@ -53,6 +53,9 @@ struct AlbumDetailView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = isPrewarmCopy ? () : Self.debugStall(at: "body")
+        #endif
         Group {
             if !showsContent {
                 Color(.systemBackground)
@@ -71,6 +74,9 @@ struct AlbumDetailView: View {
                     .buttonBorderShape(.capsule)
                 }
             } else {
+                #if DEBUG
+                let _ = isPrewarmCopy ? () : Self.debugStall(at: "content")
+                #endif
                 // UICollectionView 桥接：拖拽排序 + 捏合缩放列数 + Context Menu + 选择模式（DESIGN.md §6.4）
                 ReorderablePhotoGrid(
                     photos: photos,
@@ -93,6 +99,16 @@ struct AlbumDetailView: View {
                 )
             }
         }
+        #if DEBUG
+        .background {
+            if !isPrewarmCopy {
+                PushProbe().frame(width: 0, height: 0)
+                if ProcessInfo.processInfo.environment["PUSH_STALL_AT"] == "draw" {
+                    DebugStallDrawView().frame(width: 10, height: 10)
+                }
+            }
+        }
+        #endif
         .navigationTitle(album.name)
         .navigationBarTitleDisplayMode(.inline)
         // 选择中不能返回（底部栏属于这一页），与原生一致：先「取消」再离开
@@ -100,6 +116,9 @@ struct AlbumDetailView: View {
         .toolbar { toolbarContent }
         .onAppear {
             guard !showsContent else { return }
+            #if DEBUG
+            Self.debugStall(at: "appear")
+            #endif
             DispatchQueue.main.async { showsContent = true }
         }
         .onChange(of: selectedIDs) {
@@ -180,6 +199,18 @@ struct AlbumDetailView: View {
             #endif
         }
     }
+
+    #if DEBUG
+    /// PUSH_STALL=毫秒 PUSH_STALL_AT=body|appear：第一次进相簿时在指定位置卡住主线程（模拟真机首次搭页慢）
+    private static var stalled = false
+    fileprivate static func debugStall(at site: String) {
+        let env = ProcessInfo.processInfo.environment
+        guard !stalled, let raw = env["PUSH_STALL"], let ms = Double(raw), env["PUSH_STALL_AT", default: "body"] == site else { return }
+        stalled = true
+        print("PUSH_STALL \(site) \(ms)ms")
+        Thread.sleep(forTimeInterval: ms / 1000)
+    }
+    #endif
 
     /// 长按菜单：设为封面 / 从相簿中移除
     private func cellContextMenu(for photoID: UUID) -> [GridMenuItem] {
@@ -308,3 +339,20 @@ struct AlbumDetailView: View {
         exitSelectionMode()
     }
 }
+
+#if DEBUG
+/// PUSH_STALL_AT=draw：在 CA 提交的绘制阶段卡住（模拟真机提交时解码大量图片）
+private struct DebugStallDrawView: UIViewRepresentable {
+    final class StallView: UIView {
+        override func draw(_ rect: CGRect) {
+            AlbumDetailView.debugStall(at: "draw")
+        }
+    }
+    func makeUIView(context: Context) -> StallView {
+        let view = StallView()
+        view.backgroundColor = .clear
+        return view
+    }
+    func updateUIView(_ uiView: StallView, context: Context) {}
+}
+#endif

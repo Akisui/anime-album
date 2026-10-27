@@ -86,7 +86,8 @@ struct AlbumsView: View {
                     navigationPath.append(first)
                 }
                 // TAP_ALBUM=秒：等这么久后按点按同一套逻辑打开第一个相簿，并逐帧记录推入期间的掉帧
-                if let raw = env["TAP_ALBUM"], let delay = Double(raw), let first = albums.first {
+                // 放在独立 Task 里：推入后根页面消失、.task 被取消，`try? await Task.sleep` 会立即返回，后续步骤全挤在一起
+                if let raw = env["TAP_ALBUM"], let delay = Double(raw), let first = albums.first { Task {
                     try? await Task.sleep(for: .seconds(delay))
                     var last = CACurrentMediaTime()
                     var gaps: [Int] = []
@@ -115,7 +116,7 @@ struct AlbumsView: View {
                     try? await Task.sleep(for: .seconds(1))
                     monitor2.stop()
                     print("PUSH_HITCHES second \(gaps)")
-                }
+                } }
                 // ALBUMS_SELECT=n 自动进入相簿列表的选择模式并预选前 n 个
                 if let raw = env["ALBUMS_SELECT"], let count = Int(raw) {
                     try? await Task.sleep(for: .seconds(0.6))
@@ -168,6 +169,14 @@ struct AlbumsView: View {
         // 明确带动画推入：偶尔按下的事务里动画被禁掉，相簿页直接出现、没有从右往左的过渡（用户反馈）
         var transaction = Transaction(animation: .default)
         transaction.disablesAnimations = false
+        #if DEBUG
+        PushDiagnostics.shared.albumTapped(album.name)
+        // PUSH_NO_ANIM=1：故意不带动画推入（验证推入诊断能分辨出来）
+        if ProcessInfo.processInfo.environment["PUSH_NO_ANIM"] == "1" {
+            transaction = Transaction()
+            transaction.disablesAnimations = true
+        }
+        #endif
         withTransaction(transaction) {
             navigationPath.append(album)
         }

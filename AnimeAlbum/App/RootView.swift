@@ -15,6 +15,7 @@ struct RootView: View {
     @Query(sort: \Album.sortIndex) private var albums: [Album]
     @State private var newAlbumName = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     @State private var viewerPresenter = ViewerPresenter()
     @State private var selectionBarPresenter = SelectionBarPresenter()
     /// 启动后在屏幕外预先搭一遍相簿页（见 albumPagePrewarm）
@@ -38,6 +39,14 @@ struct RootView: View {
             .environment(viewerPresenter)
             .environment(selectionBarPresenter)
             .task { await launchTasks() }
+            #if DEBUG
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                PushDiagnostics.shared.note("scenePhase \(phase)")
+            }
+            .onChange(of: selectedTab) { _, tab in
+                PushDiagnostics.shared.note("切到 Tab \(tab)")
+            }
+            #endif
     }
 
     private var tabs: some View {
@@ -131,8 +140,14 @@ struct RootView: View {
             try? await Task.sleep(for: .seconds(1))
             guard prewarmAlbum == nil, let first = albums.first else { return }
             prewarmAlbum = first
+            #if DEBUG
+            PushDiagnostics.shared.note("预搭相簿页开始")
+            #endif
             try? await Task.sleep(for: .seconds(0.5))
             prewarmAlbum = nil
+            #if DEBUG
+            PushDiagnostics.shared.note("预搭相簿页结束")
+            #endif
         }
         #if DEBUG
         DebugSeeder.applyLaunchTweaks()
