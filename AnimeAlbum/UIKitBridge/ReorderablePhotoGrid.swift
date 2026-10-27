@@ -28,6 +28,9 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
     var anchorsToBottom = false
     /// 给隐藏的照片打标记（显示选项为「全部显示」时）
     var marksHidden = false
+    /// 内容标识（显示选项）：变了就整块交叉淡化换成新内容，而不是逐格增删 —— 逐格增删时几十张同时淡出、
+    /// 其余斜着补位，贴底的图库还跟着滚，很乱（用户反馈）
+    var contentKey: AnyHashable?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -296,7 +299,44 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
         /// 打了隐藏标记的照片
         private var markedHidden: Set<UUID> = []
 
+        private var lastContentKey: AnyHashable?
+
         func update(photos: [Photo]) {
+            let contentChanged = lastContentKey != nil && parent.contentKey != lastContentKey
+            lastContentKey = parent.contentKey
+            if contentChanged {
+                crossfade { self.applyUpdate(photos: photos, animated: false) }
+            } else {
+                applyUpdate(photos: photos, animated: true)
+            }
+        }
+
+        /// 旧画面截图盖在上面，底下直接换成新内容（定位到最新 / 顶部），再把截图淡掉
+        private func crossfade(_ change: () -> Void) {
+            guard let collectionView, let container = collectionView.superview,
+                  let cover = collectionView.snapshotView(afterScreenUpdates: false)
+            else {
+                change()
+                return
+            }
+            cover.frame = collectionView.frame
+            container.addSubview(cover)
+            change()
+            if let anchored = collectionView as? BottomAnchoredCollectionView, parent.anchorsToBottom {
+                collectionView.layoutIfNeeded()
+                anchored.scrollToBottom(animated: false)
+            } else {
+                collectionView.setContentOffset(
+                    CGPoint(x: 0, y: -collectionView.adjustedContentInset.top), animated: false)
+            }
+            UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) {
+                cover.alpha = 0
+            } completion: { _ in
+                cover.removeFromSuperview()
+            }
+        }
+
+        private func applyUpdate(photos: [Photo], animated: Bool) {
             badges = Dictionary(
                 photos.compactMap { photo in CellBadge.of(photo).map { (photo.id, $0) } },
                 uniquingKeysWith: { first, _ in first })
@@ -327,9 +367,9 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
             // 停在底部时新增照片（导入）后仍贴住底部，新照片直接可见（原生同款）
             let anchored = collectionView as? BottomAnchoredCollectionView
             let sticksToBottom = parent.anchorsToBottom && (anchored?.isAtBottom ?? false)
-            dataSource.apply(snapshot, animatingDifferences: true) {
+            dataSource.apply(snapshot, animatingDifferences: animated) {
                 if sticksToBottom {
-                    anchored?.scrollToBottom(animated: true)
+                    anchored?.scrollToBottom(animated: animated)
                 }
             }
             // 页脚只在创建时配置一次，数量变了要手动刷新（否则导入 / 删除后计数不变）
@@ -1165,9 +1205,19 @@ extension ReorderablePhotoGrid.Coordinator {
         let menu = PhotoContextMenuController(
             photoID: photoID, aspectRatio: aspectRatio, sourceFrame: sourceFrame, startFrame: startFrame,
             placeholderImage: placeholder, items: items
-        ) { [weak self, weak photoCell] in
-            photoCell?.isHiddenForMenu = false
+        ) { [weak self, weak photoCell] removed in
             self?.contextMenuActive = false
+            guard removed else {
+                photoCell?.isHiddenForMenu = false
+                return
+            }
+            // 照片被移走：格子保持隐藏直到被删掉（复用时 prepareForReuse 复原）；万一没移走，过一会儿再显示回来
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                guard let self, self.dataSource.indexPath(for: photoID) != nil else { return }
+                if let cell = photoCell, cell.photoID == photoID {
+                    cell.isHiddenForMenu = false
+                }
+            }
         }
         var presenter = window.rootViewController
         while let presented = presenter?.presentedViewController {

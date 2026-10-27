@@ -82,6 +82,47 @@ final class PhotoGridCompositionalLayout: UICollectionViewCompositionalLayout, T
     ) -> UICollectionViewLayoutAttributes? {
         layoutAttributesForSupplementaryView(ofKind: elementKind, at: elementIndexPath)
     }
+
+    // MARK: 增删动画：删掉的（如隐藏后不再显示）原地缩小淡出，新出现的原地放大淡入，其余照片补位
+
+    private var deletedIndexPaths: Set<IndexPath> = []
+    private var insertedIndexPaths: Set<IndexPath> = []
+
+    override func prepare(forCollectionViewUpdates updateItems: [UICollectionViewUpdateItem]) {
+        super.prepare(forCollectionViewUpdates: updateItems)
+        deletedIndexPaths = Set(updateItems.filter { $0.updateAction == .delete }.compactMap(\.indexPathBeforeUpdate))
+        insertedIndexPaths = Set(updateItems.filter { $0.updateAction == .insert }.compactMap(\.indexPathAfterUpdate))
+    }
+
+    override func finalizeCollectionViewUpdates() {
+        super.finalizeCollectionViewUpdates()
+        deletedIndexPaths = []
+        insertedIndexPaths = []
+    }
+
+    override func finalLayoutAttributesForDisappearingItem(at itemIndexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+        let attributes = super.finalLayoutAttributesForDisappearingItem(at: itemIndexPath)
+        guard deletedIndexPaths.contains(itemIndexPath),
+              let shrunk = (attributes ?? layoutAttributesForItem(at: itemIndexPath))?.copy() as? UICollectionViewLayoutAttributes
+        else {
+            return attributes
+        }
+        shrunk.alpha = 0
+        shrunk.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+        return shrunk
+    }
+
+    override func initialLayoutAttributesForAppearingItem(at itemIndexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+        let attributes = super.initialLayoutAttributesForAppearingItem(at: itemIndexPath)
+        guard insertedIndexPaths.contains(itemIndexPath),
+              let grown = (attributes ?? layoutAttributesForItem(at: itemIndexPath))?.copy() as? UICollectionViewLayoutAttributes
+        else {
+            return attributes
+        }
+        grown.alpha = 0
+        grown.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+        return grown
+    }
 }
 
 /// 一行一张、按原始比例的单列布局（最疏档）：宽度铺满，高度 = 宽 ÷ 宽高比，不裁成正方形。

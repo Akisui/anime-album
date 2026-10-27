@@ -43,8 +43,12 @@ final class PhotoCollectionCell: UICollectionViewCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// 当前显示的照片
+    private(set) var photoID: UUID?
+
     /// kind：格子尺寸对应的缩略图（最密档用 tiny，其余 small）
     func configure(photoID: UUID, kind: ThumbnailKind = .small) {
+        self.photoID = photoID
         #if DEBUG
         if ProcessInfo.processInfo.environment["CLOSE_PROBE"] == "1" {
             print("CELL_CONFIGURE \(photoID.uuidString.prefix(4)) cached=\(ThumbnailCache.shared.cachedImage(for: photoID, kind: kind) != nil)")
@@ -355,6 +359,7 @@ final class PhotoCollectionCell: UICollectionViewCell {
         badge?.transform = CGAffineTransform(scaleX: badgeScale, y: badgeScale)
         isPressLifted = false
         isElevated = false
+        isHiddenForMenu = false
         layer.removeAnimation(forKey: "liftShadow")
         layer.removeAnimation(forKey: "pressScale")
         layer.removeAnimation(forKey: "pressShadowPath")

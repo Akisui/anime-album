@@ -186,13 +186,20 @@ struct HiddenFilterSection: View {
 
     private func choose(_ option: HiddenFilter) {
         guard option.showsHidden else {
-            filter = option
+            apply(option)
             return
         }
         Task {
             if await privacyLock.unlockHidden() {
-                filter = option
+                apply(option)
             }
+        }
+    }
+
+    /// 带动画切换：相簿列表逐张淡入淡出补位，空状态与网格交叉淡化（照片网格自己整块交叉淡化，见 contentKey）
+    private func apply(_ option: HiddenFilter) {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            filter = option
         }
     }
 }

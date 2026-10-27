@@ -24,7 +24,8 @@ private struct AlbumsPage: View {
         case .hiddenOnly: predicate = #Predicate { $0.isHidden == true }
         case .all: predicate = nil
         }
-        _albums = Query(filter: predicate, sort: \Album.sortIndex)
+        // 隐藏 / 取消隐藏相簿后列表变化带动画（卡片淡出、其余补位）
+        _albums = Query(filter: predicate, sort: \Album.sortIndex, animation: .easeInOut(duration: 0.3))
     }
 
     @State private var showingNewAlbum = false

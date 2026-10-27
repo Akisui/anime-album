@@ -161,7 +161,8 @@ private struct LibraryPage: View {
                 selectedIDs: $selectedIDs,
                 allowsReordering: false,
                 anchorsToBottom: true,
-                marksHidden: filter == .all
+                marksHidden: filter == .all,
+                contentKey: filter
             )
             // 照片滚到导航栏 / Tab 栏下方（材质透出内容）；UIKit 按 adjustedContentInset 让出首末行
             .ignoresSafeArea()
@@ -192,10 +193,12 @@ private struct LibraryPage: View {
             GridMenuItem(title: "添加到相簿", systemImage: "rectangle.stack.badge.plus",
                          children: albumItems + [newAlbum]),
             GridMenuItem(title: photo.isHidden ? "取消隐藏" : "隐藏",
-                         systemImage: photo.isHidden ? "eye" : "eye.slash") {
-                photo.isHidden.toggle()
-                try? modelContext.save()
-            },
+                         systemImage: photo.isHidden ? "eye" : "eye.slash",
+                         action: {
+                             photo.isHidden.toggle()
+                             try? modelContext.save()
+                         },
+                         removesPhoto: !filter.includes(isHidden: !photo.isHidden)),
             GridMenuItem(title: "删除", systemImage: "trash", isDestructive: true) {
                 photosPendingDeletion = [photo]
             },

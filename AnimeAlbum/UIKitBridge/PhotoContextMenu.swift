@@ -10,6 +10,8 @@ struct GridMenuItem {
     var action: (() -> Void)?
     /// 子菜单（如「添加到相簿」→ 各相簿）：点进去在原处换成子项列表
     var children: [GridMenuItem] = []
+    /// 选了之后照片会从当前页消失（如默认显示下「隐藏」）：预览原地缩小淡出、不飞回格子，同时其余照片补位
+    var removesPhoto = false
 }
 
 /// 能报告「手指按下」与「手势复位」的长按：按下后照片开始逐渐浮起（震动前就有被拿起的迹象），
@@ -41,7 +43,8 @@ final class PhotoContextMenuController: UIViewController {
     private let placeholderImage: UIImage?
     private var items: [GridMenuItem]
     private var parentTitle: String?
-    private let onDismiss: () -> Void
+    /// 收起后回调；参数：照片是否被移走（是则格子保持隐藏，由网格删除）
+    private let onDismiss: (Bool) -> Void
 
     private let blurView = UIVisualEffectView(effect: nil)
     private let previewView = UIImageView()
@@ -56,7 +59,7 @@ final class PhotoContextMenuController: UIViewController {
     /// sourceFrame：格子在窗口坐标里的位置（收起时回到这里）；startFrame：弹出时照片所在位置
     /// （已浮起放大的格子，预览从这里接着放大，不先缩回再放大）
     init(photoID: UUID, aspectRatio: CGFloat, sourceFrame: CGRect, startFrame: CGRect? = nil,
-         placeholderImage: UIImage?, items: [GridMenuItem], onDismiss: @escaping () -> Void) {
+         placeholderImage: UIImage?, items: [GridMenuItem], onDismiss: @escaping (Bool) -> Void) {
         self.photoID = photoID
         self.aspectRatio = aspectRatio > 0 ? aspectRatio : 1
         self.sourceFrame = sourceFrame
@@ -171,7 +174,11 @@ final class PhotoContextMenuController: UIViewController {
             relayoutMenu()
             return
         }
-        dismissMenu(then: item.action)
+        if item.removesPhoto {
+            dismissRemoving(then: item.action)
+        } else {
+            dismissMenu(then: item.action)
+        }
     }
 
     private func showRootItems() {
@@ -206,10 +213,36 @@ final class PhotoContextMenuController: UIViewController {
             self.menuView.alpha = 0
             self.menuView.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
         } completion: {
-            self.onDismiss()
+            self.onDismiss(false)
             self.dismiss(animated: false) {
                 action?()
             }
+        }
+    }
+
+    /// 照片要从当前页消失：预览在原处缩小淡出（格子那里留着空位），消失后才执行动作，其余照片再补位 ——
+    /// 两件事同时做时几十个格子一起斜着移动，看不出是哪张没了（录屏实测）
+    private func dismissRemoving(then action: (() -> Void)?) {
+        guard !isDismissing else { return }
+        isDismissing = true
+        loadTask?.cancel()
+        let finish = {
+            action?()
+            self.onDismiss(true)
+            self.dismiss(animated: false)
+        }
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            finish()
+            return
+        }
+        UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseIn]) {
+            self.blurView.effect = nil
+            self.previewView.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+            self.previewView.alpha = 0
+            self.menuView.alpha = 0
+            self.menuView.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
+        } completion: { _ in
+            finish()
         }
     }
 

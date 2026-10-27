@@ -228,7 +228,8 @@ struct AlbumDetailView: View {
                 viewerPresenter: viewerPresenter,
                 isSelecting: isSelecting,
                 selectedIDs: $selectedIDs,
-                marksHidden: filter == .all
+                marksHidden: filter == .all,
+                contentKey: filter
             )
         }
     }
@@ -257,18 +258,26 @@ struct AlbumDetailView: View {
                 album.coverPhotoID = photoID
                 try? modelContext.save()
             },
-            GridMenuItem(title: hiddenTitle(photoID), systemImage: hiddenImage(photoID)) {
-                if let photo = photos.first(where: { $0.id == photoID }) {
-                    photo.isHidden.toggle()
-                    try? modelContext.save()
-                }
-            },
+            GridMenuItem(title: hiddenTitle(photoID), systemImage: hiddenImage(photoID),
+                         action: {
+                             if let photo = photos.first(where: { $0.id == photoID }) {
+                                 photo.isHidden.toggle()
+                                 try? modelContext.save()
+                             }
+                         },
+                         removesPhoto: hidingRemoves(photoID)),
             GridMenuItem(title: "从相簿中移除", systemImage: "rectangle.stack.badge.minus", isDestructive: true) {
                 if let photo = photos.first(where: { $0.id == photoID }) {
                     AlbumOperations.remove(photo, from: album, in: modelContext)
                 }
             },
         ]
+    }
+
+    /// 切换隐藏后这张是否不再符合当前显示选项（从这一页消失）
+    private func hidingRemoves(_ photoID: UUID) -> Bool {
+        guard let photo = photos.first(where: { $0.id == photoID }) else { return false }
+        return !filter.includes(isHidden: !photo.isHidden)
     }
 
     private func hiddenTitle(_ photoID: UUID) -> String {
