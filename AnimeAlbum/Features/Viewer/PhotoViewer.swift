@@ -542,6 +542,7 @@ struct PhotoViewerOverlay: View {
                     .foregroundStyle(.primary)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
+                    .viewerCircleButton()
             }
             Spacer()
             moreMenu
@@ -1132,13 +1133,23 @@ private struct ViewerMoreMenu: View, Equatable {
             }
         } label: {
             // 圆形底色 + 三个点（原生相册同款），不用 ellipsis.circle 的描边圆圈
-            Image(systemName: "ellipsis")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color(.tertiarySystemFill)))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            // iOS 26：玻璃圆（与关闭按钮一致）
+            if GlassSymbols.isGlass {
+                Image(systemName: "ellipsis")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                    .viewerCircleButton()
+            } else {
+                Image(systemName: "ellipsis")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(Color(.tertiarySystemFill)))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
         }
         .accessibilityLabel("更多")
     }

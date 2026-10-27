@@ -276,7 +276,18 @@ struct PageMoreMenu<Actions: View>: View {
                 HiddenFilterSection(filter: $filter)
             }
         } label: {
-            Label("更多", systemImage: filter == .visible || !showsFilter ? "ellipsis.circle" : "ellipsis.circle.fill")
+            if GlassSymbols.isGlass {
+                // iOS 26：按钮自带玻璃圆底，用不带圈的符号；正在显示隐藏内容时右上角一个强调色小点
+                Image(systemName: GlassSymbols.more)
+                    .overlay(alignment: .topTrailing) {
+                        if filter != .visible && showsFilter {
+                            Circle().fill(Color.accentColor).frame(width: 7, height: 7).offset(x: 5, y: -5)
+                        }
+                    }
+                    .accessibilityLabel("更多")
+            } else {
+                Label("更多", systemImage: filter == .visible || !showsFilter ? GlassSymbols.more : GlassSymbols.moreFilled)
+            }
         }
     }
 }
@@ -296,7 +307,7 @@ struct AppLockScreen: View {
             Button("使用\(privacyLock.biometryName)解锁") {
                 Task { await privacyLock.unlockApp() }
             }
-            .buttonStyle(.borderedProminent)
+            .prominentButtonStyle()
             .buttonBorderShape(.capsule)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

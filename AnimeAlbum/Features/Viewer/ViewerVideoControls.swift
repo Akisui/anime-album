@@ -106,7 +106,7 @@ struct ViewerVideoControls: View {
         .padding(.leading, 6)
         .padding(.trailing, 14)
         .frame(height: Self.height)
-        .background(.regularMaterial, in: Capsule())
+        .glassBackground(in: Capsule())
     }
 
     static func format(_ seconds: Double) -> String {

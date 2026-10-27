@@ -131,7 +131,7 @@ struct SelectionBarOverlay: View {
                     Menu {
                         moreMenuItems
                     } label: {
-                        Image(systemName: "ellipsis.circle")
+                        Image(systemName: GlassSymbols.more)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -143,11 +143,7 @@ struct SelectionBarOverlay: View {
             .imageScale(.large)
             .padding(.horizontal, 8)
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 49)
-        .background(.bar)
-        .background(Color(.systemBackground))
-        .overlay(alignment: .top) { Divider() }
+        .modifier(SelectionBarChrome())
         #if DEBUG
         // 调试辅助：TAP_BAR_DELETE=1 出现 2s 后自动按一次删除（配合预选，验证确认框里的数量）
         .task {
@@ -156,5 +152,35 @@ struct SelectionBarOverlay: View {
             session.onDelete()
         }
         #endif
+    }
+}
+
+/// 选择栏的外形：iOS 26 是与悬浮 Tab 栏同位置、同高的玻璃胶囊（更宽，完全盖住 Tab 栏；底下垫不透明底色，
+/// 不然 Tab 栏图标会从玻璃里透出来 —— 不能把 Tab 栏藏起来，藏起时安全区变化、照片流跳 49pt，iOS 26 实测）；
+/// iOS 18 是覆盖在 Tab 栏上的整条工具栏
+private struct SelectionBarChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .padding(.horizontal, 6)
+                .frame(maxWidth: .infinity)
+                .frame(height: 62)
+                .glassEffect(.regular, in: Capsule())
+                .background {
+                    Capsule()
+                        .fill(Color(.systemBackground))
+                        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+                }
+                .padding(.horizontal, 16)
+                // 与 Tab 栏胶囊底边对齐（Tab 栏比底部安全区边缘低 13pt）
+                .offset(y: 13)
+        } else {
+            content
+                .frame(maxWidth: .infinity)
+                .frame(height: 49)
+                .background(.bar)
+                .background(Color(.systemBackground))
+                .overlay(alignment: .top) { Divider() }
+        }
     }
 }

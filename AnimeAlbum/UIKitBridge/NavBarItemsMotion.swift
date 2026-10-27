@@ -34,6 +34,9 @@ final class NavBarItemsMotion {
     private var installed = false
 
     fileprivate func pageWillAppear(_ probe: UIViewController) {
+        // iOS 26：导航栏按钮在玻璃胶囊里原地形变过渡（系统 Liquid Glass 设计），不再按页面滑动；
+        // 那边导航栏的视图结构也不一样，这里的处理不适用
+        if #available(iOS 26.0, *) { return }
         // 这一页的控制器：往上找到直接挂在导航控制器下的那一层
         var page: UIViewController? = probe
         while let current = page, !(current.parent is UINavigationController) {
