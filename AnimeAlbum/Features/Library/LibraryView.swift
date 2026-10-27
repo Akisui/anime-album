@@ -58,6 +58,7 @@ private struct LibraryPage: View {
                 .onChange(of: selectedIDs) {
                     selectionBarPresenter.update(photos: selectedPhotos)
                 }
+                .resetsHiddenFilter($filter)
         }
         .task {
             #if DEBUG
@@ -216,17 +217,17 @@ private struct LibraryPage: View {
                 }
             }
         } else {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                HiddenFilterMenu(filter: $filter)
-                if !photos.isEmpty {
-                    Button("选择") {
-                        toggleSelectionMode()
+            // 右上角只放「选择」和「…」（导入、显示选项都在「…」里）
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 19) {
+                    if !photos.isEmpty {
+                        Button("选择") {
+                            toggleSelectionMode()
+                        }
                     }
-                }
-                Menu {
-                    importMenuItems
-                } label: {
-                    Label("导入", systemImage: "plus")
+                    PageMoreMenu(filter: $filter) {
+                        importMenuItems
+                    }
                 }
             }
         }
@@ -234,10 +235,10 @@ private struct LibraryPage: View {
 
     @ViewBuilder
     private var importMenuItems: some View {
-        Button("从照片图库", systemImage: "photo.on.rectangle") {
+        Button("从照片图库导入", systemImage: "photo.on.rectangle") {
             showingPhotosPicker = true
         }
-        Button("从文件", systemImage: "folder") {
+        Button("从文件导入", systemImage: "folder") {
             showingFileImporter = true
         }
     }

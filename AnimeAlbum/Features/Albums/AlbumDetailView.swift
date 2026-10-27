@@ -96,6 +96,7 @@ struct AlbumDetailView: View {
         // 选择中不能返回（底部栏属于这一页），与原生一致：先「取消」再离开
         .navigationBarBackButtonHidden(isSelecting)
         .toolbar { toolbarContent }
+        .resetsHiddenFilter($filter)
         .onAppear {
             guard !showsContent else { return }
             #if DEBUG
@@ -293,15 +294,15 @@ struct AlbumDetailView: View {
             // 与按钮种类无关）。间距 19 = 系统两个独立项的间距。整项随页面滑动（NavBarItemsMotion）
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 19) {
-                    HiddenFilterMenu(filter: $filter)
                     // 按查询结果判断、不看 photos：推入期间 photos 还是空的（showsContent）
                     if !entries.isEmpty {
                         Button("选择") { enterSelectionMode() }
                     }
-                    Menu {
-                        addMenuItems
-                    } label: {
-                        Label("添加照片", systemImage: "plus")
+                    // 添加照片、显示选项都在「…」里
+                    PageMoreMenu(filter: $filter) {
+                        Menu("添加照片", systemImage: "plus") {
+                            addMenuItems
+                        }
                     }
                 }
                 .background { NavBarItemsMotion.ItemProbe(motion: navItemsMotion) }

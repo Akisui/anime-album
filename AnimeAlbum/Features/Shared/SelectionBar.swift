@@ -63,7 +63,7 @@ final class SelectionBarPresenter {
     }
 }
 
-/// 选择模式底部栏（覆盖在 Tab 栏之上）：左分享（仅选照片时）/ 中计数 / 右加入相簿（仅选照片时）+ 删除。
+/// 选择模式底部栏（覆盖在 Tab 栏之上）：左分享（仅选照片时）/ 中计数 / 右「…」（添加到相簿、隐藏）+ 删除。
 /// 高度与 Tab 栏图标区一致（49pt），背景延伸进 Home 指示条区域；
 /// 底层铺不透明系统背景色盖住下面的 Tab 图标（材质是半透明的）。
 struct SelectionBarOverlay: View {
@@ -73,6 +73,28 @@ struct SelectionBarOverlay: View {
         switch session.kind {
         case .photos: "张照片"
         case .albums: "个相簿"
+        }
+    }
+
+    @ViewBuilder
+    private var moreMenuItems: some View {
+        if case .photos(let excludedAlbumID) = session.kind {
+            Menu("添加到相簿", systemImage: "rectangle.stack.badge.plus") {
+                AddToAlbumMenuContent(photos: session.photos, excludingAlbumID: excludedAlbumID) {
+                    session.onNewAlbum(session.photos)
+                } onAdded: {
+                    session.onAdded()
+                }
+            }
+            Button(session.allHidden ? "取消隐藏" : "隐藏",
+                   systemImage: session.allHidden ? "eye" : "eye.slash") {
+                session.onToggleHidden()
+            }
+        } else {
+            Button(session.allHidden ? "取消隐藏" : "隐藏相簿",
+                   systemImage: session.allHidden ? "eye" : "eye.slash") {
+                session.onToggleHidden()
+            }
         }
     }
 
@@ -94,39 +116,27 @@ struct SelectionBarOverlay: View {
                     .disabled(session.count == 0)
                 }
                 Spacer()
-                if case .photos(let excludedAlbumID) = session.kind {
+                // 右边只放「…」和删除：添加到相簿、隐藏收进「…」（三个图标挤在一起太密，用户反馈）
+                HStack(spacing: 12) {
                     Menu {
-                        AddToAlbumMenuContent(photos: session.photos, excludingAlbumID: excludedAlbumID) {
-                            session.onNewAlbum(session.photos)
-                        } onAdded: {
-                            session.onAdded()
-                        }
+                        moreMenuItems
                     } label: {
-                        Image(systemName: "rectangle.stack.badge.plus")
+                        Image(systemName: "ellipsis.circle")
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
-                    .accessibilityLabel("添加到相簿")
+                    .accessibilityLabel("更多")
+                    .disabled(session.count == 0)
+                    Button {
+                        session.onDelete()
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("删除")
                     .disabled(session.count == 0)
                 }
-                Button {
-                    session.onToggleHidden()
-                } label: {
-                    Image(systemName: session.allHidden ? "eye" : "eye.slash")
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityLabel(session.allHidden ? "取消隐藏" : "隐藏")
-                .disabled(session.count == 0)
-                Button {
-                    session.onDelete()
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityLabel("删除")
-                .disabled(session.count == 0)
             }
             .font(.body)
             .imageScale(.large)

@@ -67,6 +67,7 @@ private struct AlbumsPage: View {
                 AlbumDetailScreen(album: album)
             }
             .toolbar { toolbarContent }
+            .resetsHiddenFilter($filter)
             .onChange(of: selectedIDs) {
                 selectionBarPresenter.update(
                     count: selectedIDs.count,
@@ -241,11 +242,12 @@ private struct AlbumsPage: View {
             // 合成一项（原因见 AlbumDetailView.toolbarContent），随页面一起滑动（NavBarItemsMotion）
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 19) {
-                    HiddenFilterMenu(filter: $filter)
                     if !albums.isEmpty {
                         Button("选择") { enterSelectionMode() }
                     }
-                    Button("新建相簿", systemImage: "plus") { promptNewAlbum() }
+                    PageMoreMenu(filter: $filter) {
+                        Button("新建相簿", systemImage: "plus") { promptNewAlbum() }
+                    }
                 }
                 .background { NavBarItemsMotion.ItemProbe(motion: navItemsMotion) }
             }

@@ -168,26 +168,19 @@ enum HiddenFilter: String, CaseIterable, Identifiable {
     }
 }
 
-/// 导航栏的显示选项按钮：切到看得到隐藏内容的选项前先解锁（可能要验证）；隐藏内容重新上锁（App 进入后台）时自动回到默认
-struct HiddenFilterMenu: View {
+/// 「…」菜单里的「显示」一组（三选一）：切到看得到隐藏内容的选项前先解锁（可能要验证）
+struct HiddenFilterSection: View {
     @Binding var filter: HiddenFilter
     @Environment(PrivacyLock.self) private var privacyLock
 
     var body: some View {
-        Menu {
+        Section("显示") {
             Picker("显示", selection: Binding(get: { filter }, set: { choose($0) })) {
                 ForEach(HiddenFilter.allCases) { option in
                     Label(option.title, systemImage: option.systemImage).tag(option)
                 }
             }
-        } label: {
-            Label("显示", systemImage: filter == .visible
-                  ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
-        }
-        .onChange(of: privacyLock.isHiddenUnlocked) { _, unlocked in
-            if !unlocked {
-                filter = .visible
-            }
+            .pickerStyle(.inline)
         }
     }
 
@@ -199,6 +192,45 @@ struct HiddenFilterMenu: View {
         Task {
             if await privacyLock.unlockHidden() {
                 filter = option
+            }
+        }
+    }
+}
+
+/// 导航栏右上角的「…」：页面自己的操作在上，「显示」选项在下。
+/// 显示选项不是默认时图标实心，提醒正在看隐藏内容
+struct PageMoreMenu<Actions: View>: View {
+    @Binding var filter: HiddenFilter
+    @ViewBuilder var actions: Actions
+
+    var body: some View {
+        Menu {
+            Section {
+                actions
+            }
+            HiddenFilterSection(filter: $filter)
+        } label: {
+            Label("更多", systemImage: filter == .visible ? "ellipsis.circle" : "ellipsis.circle.fill")
+        }
+    }
+}
+
+extension View {
+    /// 隐藏内容重新上锁（App 进入后台）时把这一页的显示选项放回默认。
+    /// 挂在页面上（菜单收起时菜单内容不存在，挂在里面收不到）
+    func resetsHiddenFilter(_ filter: Binding<HiddenFilter>) -> some View {
+        modifier(HiddenFilterReset(filter: filter))
+    }
+}
+
+private struct HiddenFilterReset: ViewModifier {
+    @Binding var filter: HiddenFilter
+    @Environment(PrivacyLock.self) private var privacyLock
+
+    func body(content: Content) -> some View {
+        content.onChange(of: privacyLock.isHiddenUnlocked) { _, unlocked in
+            if !unlocked {
+                filter = .visible
             }
         }
     }
