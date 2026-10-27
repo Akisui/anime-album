@@ -3,7 +3,7 @@ import SwiftUI
 
 /// 隐私：打开 App 时验证、查看隐藏内容时验证（设置里两个开关），以及本次运行中「App 已解锁」「隐藏内容已解锁」的状态。
 /// 验证用 `.deviceOwnerAuthentication`：面容 ID / 触控 ID，不可用或失败多次时退回设备密码。
-/// App 进入后台时两种解锁都失效：回来时（开了开关的话）重新验证 App，各页的显示选项回到「不显示隐藏的」
+/// App 进入后台时两种解锁都失效：回来时（开了开关的话）重新验证 App，显示选项回到「不显示隐藏的」
 @MainActor
 @Observable
 final class PrivacyLock {
@@ -22,6 +22,58 @@ final class PrivacyLock {
     private(set) var isAppUnlocked: Bool
     /// 隐藏内容已解锁：某页切到「只显示隐藏的 / 全部显示」时置上，进入后台时清掉
     private(set) var isHiddenUnlocked = false
+    nonisolated static let globalFilterKey = "hiddenFilterIsGlobal"
+    nonisolated static let hiddenAlbumsHidePhotosKey = "hiddenAlbumsHidePhotos"
+
+    /// 隐藏相簿里是否仍按照片各自的隐藏标记显示（设置里选，默认否）：
+    /// 否 = 看得到隐藏相簿就看得到里面全部照片（相簿的隐藏作用于其中全部照片，用户要求），相簿里没有显示选项
+    var hiddenAlbumsHidePhotos: Bool {
+        didSet { UserDefaults.standard.set(hiddenAlbumsHidePhotos, forKey: Self.hiddenAlbumsHidePhotosKey) }
+    }
+
+    /// 显示选项用在哪：图库、相簿列表、各个相簿
+    enum FilterPage: Hashable {
+        case library
+        case albums
+        case album(UUID)
+    }
+
+    /// 显示选项的作用范围（设置里选）：true = 全局一份，在哪里切都处处生效；false = 图库、相簿列表、每个相簿各自记
+    var filtersAreGlobal: Bool {
+        didSet {
+            UserDefaults.standard.set(filtersAreGlobal, forKey: Self.globalFilterKey)
+            resetFilters()
+        }
+    }
+
+    private var globalFilter: HiddenFilter = .visible
+    private var pageFilters: [FilterPage: HiddenFilter] = [:]
+
+    func filter(for page: FilterPage) -> HiddenFilter {
+        filtersAreGlobal ? globalFilter : pageFilters[page] ?? .visible
+    }
+
+    func setFilter(_ filter: HiddenFilter, for page: FilterPage) {
+        if filtersAreGlobal {
+            globalFilter = filter
+        } else {
+            pageFilters[page] = filter
+        }
+    }
+
+    func filterBinding(for page: FilterPage) -> Binding<HiddenFilter> {
+        Binding(get: { self.filter(for: page) }, set: { self.setFilter($0, for: page) })
+    }
+
+    /// 当前有没有哪一页在显示隐藏内容（「添加到相簿」菜单据此决定是否列出隐藏的相簿）
+    var showsHiddenAnywhere: Bool {
+        filtersAreGlobal ? globalFilter.showsHidden : pageFilters.values.contains(where: \.showsHidden)
+    }
+
+    private func resetFilters() {
+        globalFilter = .visible
+        pageFilters = [:]
+    }
     /// 正在弹系统验证（期间场景会变成 inactive，不能当成离开 App）
     private(set) var isAuthenticating = false
     /// 每次上锁只自动弹一次验证：取消后场景回到 active，若再自动弹就会循环，之后靠锁屏上的按钮
@@ -37,6 +89,8 @@ final class PrivacyLock {
         let appLock = UserDefaults.standard.bool(forKey: Self.appLockKey)
         requiresAuthToOpen = appLock
         requiresAuthForHidden = UserDefaults.standard.bool(forKey: Self.hiddenLockKey)
+        filtersAreGlobal = UserDefaults.standard.object(forKey: Self.globalFilterKey) as? Bool ?? true
+        hiddenAlbumsHidePhotos = UserDefaults.standard.bool(forKey: Self.hiddenAlbumsHidePhotosKey)
         isAppUnlocked = !appLock
         autoPromptPending = appLock
     }
@@ -104,6 +158,7 @@ final class PrivacyLock {
     func didEnterBackground() {
         guard !isAuthenticating else { return }
         isHiddenUnlocked = false
+        resetFilters()
         if requiresAuthToOpen {
             isAppUnlocked = false
             autoPromptPending = true
@@ -208,6 +263,8 @@ struct HiddenFilterSection: View {
 /// 显示选项不是默认时图标实心，提醒正在看隐藏内容
 struct PageMoreMenu<Actions: View>: View {
     @Binding var filter: HiddenFilter
+    /// 没有显示选项的页面（隐藏相簿里照片全部显示时）
+    var showsFilter = true
     @ViewBuilder var actions: Actions
 
     var body: some View {
@@ -215,30 +272,11 @@ struct PageMoreMenu<Actions: View>: View {
             Section {
                 actions
             }
-            HiddenFilterSection(filter: $filter)
-        } label: {
-            Label("更多", systemImage: filter == .visible ? "ellipsis.circle" : "ellipsis.circle.fill")
-        }
-    }
-}
-
-extension View {
-    /// 隐藏内容重新上锁（App 进入后台）时把这一页的显示选项放回默认。
-    /// 挂在页面上（菜单收起时菜单内容不存在，挂在里面收不到）
-    func resetsHiddenFilter(_ filter: Binding<HiddenFilter>) -> some View {
-        modifier(HiddenFilterReset(filter: filter))
-    }
-}
-
-private struct HiddenFilterReset: ViewModifier {
-    @Binding var filter: HiddenFilter
-    @Environment(PrivacyLock.self) private var privacyLock
-
-    func body(content: Content) -> some View {
-        content.onChange(of: privacyLock.isHiddenUnlocked) { _, unlocked in
-            if !unlocked {
-                filter = .visible
+            if showsFilter {
+                HiddenFilterSection(filter: $filter)
             }
+        } label: {
+            Label("更多", systemImage: filter == .visible || !showsFilter ? "ellipsis.circle" : "ellipsis.circle.fill")
         }
     }
 }

@@ -70,19 +70,30 @@ struct SettingsView: View {
             Toggle("打开 App 时需要\(biometry)", isOn: Binding(
                 get: { privacyLock.requiresAuthToOpen },
                 set: { enabled in Task { await privacyLock.setRequiresAuthToOpen(enabled) } }))
+                .disabled(!available)
             Toggle("查看隐藏内容时需要\(biometry)", isOn: Binding(
                 get: { privacyLock.requiresAuthForHidden },
                 set: { enabled in Task { await privacyLock.setRequiresAuthForHidden(enabled) } }))
+                .disabled(!available)
+            Picker("显示选项", selection: Binding(
+                get: { privacyLock.filtersAreGlobal },
+                set: { privacyLock.filtersAreGlobal = $0 })) {
+                Text("全局统一").tag(true)
+                Text("各页面分别设置").tag(false)
+            }
+            Toggle("隐藏相簿里也按照片单独隐藏", isOn: Binding(
+                get: { privacyLock.hiddenAlbumsHidePhotos },
+                set: { privacyLock.hiddenAlbumsHidePhotos = $0 }))
         } header: {
             Text("隐私")
         } footer: {
-            if available {
-                Text("「查看隐藏内容」指在图库、相簿列表或相簿里把显示选项切到「只显示隐藏的」或「全部显示」。离开 App 后，隐藏内容会重新收起。")
-            } else {
-                Text("这台设备没有设置密码，无法开启。")
+            VStack(alignment: .leading, spacing: 6) {
+                if !available {
+                    Text("这台设备没有设置密码，无法开启验证。")
+                }
+                Text("「查看隐藏内容」指把「…」菜单里的显示选项切到「只显示隐藏的」或「全部显示」。显示选项「全局统一」时在任何地方切换，图库、相簿列表和所有相簿一起生效；「各页面分别设置」时图库、相簿列表和每个相簿各自记。隐藏相簿默认作用于其中全部照片：看得到这个相簿就看得到里面所有照片；打开「隐藏相簿里也按照片单独隐藏」后，里面的照片仍按各自的隐藏设置显示。离开 App 后，隐藏内容会重新收起。")
             }
         }
-        .disabled(!available)
     }
 
     @ViewBuilder

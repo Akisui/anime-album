@@ -2,12 +2,12 @@ import PhotosUI
 import SwiftData
 import SwiftUI
 
-/// 图库：显示选项（隐藏照片）放在这一层，变了就按新条件重建下面那页的查询
+/// 图库：显示选项（全局或各页各自，见 PrivacyLock.filter(for:)）变了就按新条件重建下面那页的查询
 struct LibraryView: View {
-    @State private var filter: HiddenFilter = .visible
+    @Environment(PrivacyLock.self) private var privacyLock
 
     var body: some View {
-        LibraryPage(filter: $filter)
+        LibraryPage(filter: privacyLock.filterBinding(for: .library))
     }
 }
 
@@ -58,7 +58,6 @@ private struct LibraryPage: View {
                 .onChange(of: selectedIDs) {
                     selectionBarPresenter.update(photos: selectedPhotos)
                 }
-                .resetsHiddenFilter($filter)
         }
         .task {
             #if DEBUG
@@ -176,7 +175,7 @@ private struct LibraryPage: View {
     private func cellContextMenu(for photoID: UUID) -> [GridMenuItem] {
         guard let photo = photos.first(where: { $0.id == photoID }) else { return [] }
         let albums = ((try? modelContext.fetch(FetchDescriptor<Album>(sortBy: [SortDescriptor(\.sortIndex)]))) ?? [])
-            .filter { !$0.isHidden || privacyLock.isHiddenUnlocked }
+            .filter { !$0.isHidden || privacyLock.showsHiddenAnywhere }
         let albumItems = albums.map { album in
             GridMenuItem(title: album.name, systemImage: "rectangle.stack") {
                 AlbumOperations.add([photo], to: album, in: modelContext)
@@ -335,9 +334,9 @@ struct AddToAlbumMenuContent: View {
     @Query(sort: \Album.sortIndex) private var allAlbums: [Album]
     @Environment(PrivacyLock.self) private var privacyLock
 
-    /// 隐藏的相簿只在隐藏内容解锁后列出
+    /// 有页面在显示隐藏内容时才列出隐藏的相簿
     private var albums: [Album] {
-        allAlbums.filter { !$0.isHidden || privacyLock.isHiddenUnlocked }
+        allAlbums.filter { !$0.isHidden || privacyLock.showsHiddenAnywhere }
     }
 
     let photos: [Photo]

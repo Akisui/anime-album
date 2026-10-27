@@ -1081,9 +1081,9 @@ private struct ViewerMoreMenu: View, Equatable {
     @Query(sort: \Album.sortIndex) private var allAlbums: [Album]
     @Environment(PrivacyLock.self) private var privacyLock
 
-    /// 隐藏的相簿只在隐藏内容解锁后列出
+    /// 有页面在显示隐藏内容时才列出隐藏的相簿
     private var albums: [Album] {
-        allAlbums.filter { !$0.isHidden || privacyLock.isHiddenUnlocked }
+        allAlbums.filter { !$0.isHidden || privacyLock.showsHiddenAnywhere }
     }
     @AppStorage("viewerReadingOrder") private var readingOrderRaw = ViewerReadingOrder.leftToRight.rawValue
 

@@ -80,8 +80,8 @@ struct RootView: View {
             // .defaultVisibility(.hidden, for: .tabBar) 在 iPhone 底部 Tab 栏上都不生效，相簿会变成一个个 Tab（实测）
             if horizontalSizeClass == .regular {
                 TabSection("我的相簿") {
-                    // 隐藏的相簿只在隐藏内容解锁后列出
-                    ForEach(albums.filter { !$0.isHidden || privacyLock.isHiddenUnlocked }) { album in
+                    // 侧栏相簿跟相簿列表的显示选项走
+                    ForEach(albums.filter { privacyLock.filter(for: .albums).includes(isHidden: $0.isHidden) }) { album in
                         Tab(album.name, systemImage: "rectangle.stack", value: RootTab.album(album.id)) {
                             NavigationStack {
                                 AlbumDetailScreen(album: album)

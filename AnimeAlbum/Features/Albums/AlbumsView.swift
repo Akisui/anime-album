@@ -1,12 +1,12 @@
 import SwiftData
 import SwiftUI
 
-/// 相簿列表：显示选项（隐藏相簿）放在这一层，变了就按新条件重建下面那页的查询
+/// 相簿列表：显示选项（全局或各页各自，见 PrivacyLock.filter(for:)）变了就按新条件重建下面那页的查询
 struct AlbumsView: View {
-    @State private var filter: HiddenFilter = .visible
+    @Environment(PrivacyLock.self) private var privacyLock
 
     var body: some View {
-        AlbumsPage(filter: $filter)
+        AlbumsPage(filter: privacyLock.filterBinding(for: .albums))
     }
 }
 
@@ -68,7 +68,6 @@ private struct AlbumsPage: View {
                 AlbumDetailScreen(album: album)
             }
             .toolbar { toolbarContent }
-            .resetsHiddenFilter($filter)
             .onChange(of: selectedIDs) {
                 selectionBarPresenter.update(
                     count: selectedIDs.count,

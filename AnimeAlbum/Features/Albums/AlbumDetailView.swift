@@ -2,19 +2,26 @@ import PhotosUI
 import SwiftData
 import SwiftUI
 
-/// 相簿详情：显示选项（隐藏照片）放在这一层，变了就按新条件重建下面那页的查询
+/// 相簿详情：显示选项（全局或各页各自，见 PrivacyLock.filter(for:)）变了就按新条件重建下面那页的查询
 struct AlbumDetailScreen: View {
     let album: Album
-    @State private var filter: HiddenFilter = .visible
+    @Environment(PrivacyLock.self) private var privacyLock
 
     var body: some View {
-        AlbumDetailView(album: album, filter: $filter)
+        // 隐藏的相簿（默认设置下）：相簿的隐藏作用于其中全部照片 —— 看得到这个相簿就看得到里面全部照片，没有显示选项
+        if album.isHidden, !privacyLock.hiddenAlbumsHidePhotos {
+            AlbumDetailView(album: album, filter: .constant(.all), filterAdjustable: false)
+        } else {
+            AlbumDetailView(album: album, filter: privacyLock.filterBinding(for: .album(album.id)))
+        }
     }
 }
 
 struct AlbumDetailView: View {
     let album: Album
     @Binding var filter: HiddenFilter
+    /// 有没有显示选项（隐藏相簿里照片全部显示时没有）
+    var filterAdjustable = true
 
     @Environment(\.modelContext) private var modelContext
     @Environment(ViewerPresenter.self) private var viewerPresenter
@@ -41,9 +48,10 @@ struct AlbumDetailView: View {
     /// 1500 张的相簿每次刷新 110～230ms，第一次进相簿时刷新好几次，推入动画被吃掉，采样实测）
     @Query private var entries: [AlbumEntry]
 
-    init(album: Album, filter: Binding<HiddenFilter>) {
+    init(album: Album, filter: Binding<HiddenFilter>, filterAdjustable: Bool = true) {
         self.album = album
         _filter = filter
+        self.filterAdjustable = filterAdjustable
         let albumID = album.id
         let predicate: Predicate<AlbumEntry>
         switch filter.wrappedValue {
@@ -96,7 +104,6 @@ struct AlbumDetailView: View {
         // 选择中不能返回（底部栏属于这一页），与原生一致：先「取消」再离开
         .navigationBarBackButtonHidden(isSelecting)
         .toolbar { toolbarContent }
-        .resetsHiddenFilter($filter)
         .onAppear {
             guard !showsContent else { return }
             #if DEBUG
@@ -308,7 +315,7 @@ struct AlbumDetailView: View {
                         Button("选择") { enterSelectionMode() }
                     }
                     // 添加照片、显示选项都在「…」里
-                    PageMoreMenu(filter: $filter) {
+                    PageMoreMenu(filter: $filter, showsFilter: filterAdjustable) {
                         Menu("添加照片", systemImage: "plus") {
                             addMenuItems
                         }
