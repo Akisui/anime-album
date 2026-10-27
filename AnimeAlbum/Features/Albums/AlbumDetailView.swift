@@ -242,14 +242,19 @@ struct AlbumDetailView: View {
                 Button("取消") { exitSelectionMode() }
             }
         } else {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if !photos.isEmpty {
-                    Button("选择") { enterSelectionMode() }
-                }
-                Menu {
-                    addMenuItems
-                } label: {
-                    Label("添加照片", systemImage: "plus")
+            // 两个按钮合成一个导航栏项：分成两项时，推入过渡中系统只显示第一项、第二项等滑入结束才冒出来（iOS 18 实测，
+            // 与按钮种类无关）。间距 19 与相簿列表页的两个独立项（「选择」「+」）位置逐像素重合，推入交叉淡化时不重影
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 19) {
+                    // 按查询结果判断、不看 photos：推入期间 photos 还是空的（showsContent）
+                    if !entries.isEmpty {
+                        Button("选择") { enterSelectionMode() }
+                    }
+                    Menu {
+                        addMenuItems
+                    } label: {
+                        Label("添加照片", systemImage: "plus")
+                    }
                 }
             }
         }
