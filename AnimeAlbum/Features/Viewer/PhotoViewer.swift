@@ -165,7 +165,7 @@ struct PhotoViewerOverlay: View {
     @AppStorage("viewerReadingOrder") private var readingOrderRaw = ViewerReadingOrder.leftToRight.rawValue
     /// 连续长条模式下查询某张图在屏幕上的位置（关闭过渡的起点）
     @State private var continuousBox = ContinuousStripBox()
-    /// 当前页视频的播放状态（底部控制条、左下角暂停标识读它）
+    /// 当前页视频的播放状态（底部控制条读它）
     @State private var videoState = ViewerVideoState()
 
     /// 每页缩放状态由页面的代理回调维护（含离屏自动复位），跨页切换不丢失
@@ -313,15 +313,6 @@ struct PhotoViewerOverlay: View {
                 .allowsHitTesting(chromeInteractive)
             }
             .ignoresSafeArea()
-
-            // 视频暂停、控制条收起时：左下角的暂停标识
-            ViewerVideoPausedBadge(
-                state: videoState,
-                eligible: currentIsVideo && presenter.chromeHidden && phase == .presented)
-                .padding(.leading, 16)
-                .padding(.bottom, stableSafeBottom + 16)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .ignoresSafeArea()
         }
         .confirmationDialog(
             pendingDeletion?.page != nil ? "删除这个 PDF？" : "删除这张照片？",

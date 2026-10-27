@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// 查看器里当前这段视频的播放状态：当前页的 VideoPlaybackView 接上来（翻走时断开），底部控制条和
-/// 左下角暂停标识读它。进度每秒刷新 30 次 —— 只有读它的控制条重算，查看器本身不读进度
+/// 查看器里当前这段视频的播放状态：当前页的 VideoPlaybackView 接上来（翻走时断开），底部控制条读它。进度每秒刷新 30 次 —— 只有读它的控制条重算，查看器本身不读进度
 @MainActor
 @Observable
 final class ViewerVideoState {
@@ -74,7 +73,8 @@ final class ViewerVideoState {
     }
 }
 
-/// 底部控制条：左边播放 / 暂停，右边进度条与时间。随顶部 bar / 胶片条一起显隐（单击唤出）
+/// 底部控制条：左边播放 / 暂停，右边进度条与时间。随顶部 bar / 胶片条一起显隐（单击唤出）。
+/// 控制条收起时画面上什么都不显示 —— 双击暂停后也不出暂停标识（用户要求）
 struct ViewerVideoControls: View {
     static let height: CGFloat = 44
 
@@ -151,30 +151,5 @@ private struct VideoScrubber: View {
         .accessibilityElement()
         .accessibilityLabel("播放进度")
         .accessibilityValue(ViewerVideoControls.format(state.currentTime))
-    }
-}
-
-/// 控制条收起时、视频暂停中：左下角一个小标识（点它也能播放）
-struct ViewerVideoPausedBadge: View {
-    let state: ViewerVideoState
-    /// 当前页是视频且控制条收起
-    let eligible: Bool
-
-    var body: some View {
-        let visible = eligible && state.activeID != nil && !state.isPlaying
-        Button {
-            state.play()
-        } label: {
-            Image(systemName: "play.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 36, height: 36)
-                .background(Color.black.opacity(0.4), in: Circle())
-        }
-        .accessibilityLabel("播放")
-        .opacity(visible ? 1 : 0)
-        .allowsHitTesting(visible)
-        // 控制条收起时等它基本淡完再出现（否则叠在还没淡完的胶片条上）；消失要快
-        .animation(visible ? .easeInOut(duration: 0.2).delay(0.2) : .easeInOut(duration: 0.12), value: visible)
     }
 }

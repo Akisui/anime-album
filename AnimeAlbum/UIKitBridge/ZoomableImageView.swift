@@ -7,7 +7,7 @@ import UIKit
 struct ZoomableImageView: UIViewRepresentable {
     let item: ViewerItem
     let isCurrent: Bool
-    /// 视频：当前页把播放器接到这里，底部控制条 / 暂停标识读它
+    /// 视频：当前页把播放器接到这里，底部控制条读它
     var videoState: ViewerVideoState?
     var onSingleTap: () -> Void
     var onZoomChanged: (Bool) -> Void
