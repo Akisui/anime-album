@@ -20,6 +20,8 @@ struct ViewerItem: Identifiable, Hashable {
     var filePath = ""
     /// 实况照片的配套视频
     var pairedVideoPath: String?
+    /// 视频时长（秒）
+    var duration: Double = 0
 
     /// 轻量标识（不要拼字符串）：翻页器 / 胶片条每次刷新都要把所有页的 id 算一遍并比较，
     /// 拼字符串在几千张的图库里每次刷新多花几毫秒，翻页时一卡一卡（实测）
@@ -45,7 +47,8 @@ struct ViewerItem: Identifiable, Hashable {
         guard photo.isPDF else {
             return [ViewerItem(photoID: photo.id, page: nil, pageCount: 0, aspectRatio: photoAspect,
                                isVectorPage: false, revision: photo.editRevision, media: photo.kind,
-                               filePath: photo.fileRelativePath, pairedVideoPath: photo.pairedVideoRelativePath)]
+                               filePath: photo.fileRelativePath, pairedVideoPath: photo.pairedVideoRelativePath,
+                               duration: photo.duration)]
         }
         let pages = PDFPageStore.shared.pages(photoID: photo.id)
         guard !pages.isEmpty else {

@@ -3,35 +3,45 @@ import ImageIO
 import PhotosUI
 import UIKit
 
-/// 查看器里的视频：叠在封面帧（ZoomableImageView 的 imageView）上，中间一个播放按钮；
-/// 点按钮播放 / 暂停，播完回到开头。原文件在 iCloud 云盘还没下载时先下载再播
+/// 查看器里的视频：叠在封面帧（ZoomableImageView 的 imageView）上、随图片一起缩放。
+/// 画面上不放任何控件（用户要求平时无遮挡）：双击播放 / 暂停，单击唤出底部控制条（ViewerVideoControls），
+/// 状态经 ViewerVideoState 交给控制条。原文件在 iCloud 云盘还没下载时先下载再播
 final class VideoPlaybackView: UIView {
     private let url: URL
     private let playerLayer = AVPlayerLayer()
     private var player: AVPlayer?
-    private let button = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
     private var endObserver: NSObjectProtocol?
-    private var isPlaying = false
+    private var timeObserver: Any?
+    private var preparing = false
+    private var pendingActions: [() -> Void] = []
+    /// 导入时记下的时长：播放器建好之前进度条就能显示总时长
+    private let knownDuration: Double
 
-    init(url: URL) {
+    private(set) var isPlaying = false
+    /// 播放 / 暂停、进度变化时回调
+    var onStateChange: (() -> Void)?
+
+    var currentTime: Double {
+        guard let seconds = player?.currentTime().seconds, seconds.isFinite else { return 0 }
+        return seconds
+    }
+
+    var duration: Double {
+        if let seconds = player?.currentItem?.duration.seconds, seconds.isFinite, seconds > 0 {
+            return seconds
+        }
+        return knownDuration
+    }
+
+    init(url: URL, duration: Double) {
         self.url = url
+        knownDuration = duration
         super.init(frame: .zero)
         backgroundColor = .clear
+        isUserInteractionEnabled = false
         playerLayer.videoGravity = .resizeAspect
         layer.addSublayer(playerLayer)
-
-        var config = UIButton.Configuration.filled()
-        config.image = UIImage(systemName: "play.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22))
-        config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.45)
-        config.baseForegroundColor = .white
-        config.cornerStyle = .capsule
-        config.contentInsets = NSDirectionalEdgeInsets(top: 18, leading: 20, bottom: 18, trailing: 16)
-        button.configuration = config
-        button.accessibilityLabel = "播放"
-        button.addAction(UIAction { [weak self] _ in self?.togglePlayback() }, for: .touchUpInside)
-        addSubview(button)
-
         spinner.color = .white
         spinner.hidesWhenStopped = true
         addSubview(spinner)
@@ -42,6 +52,7 @@ final class VideoPlaybackView: UIView {
 
     deinit {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let timeObserver { player?.removeTimeObserver(timeObserver) }
     }
 
     override func layoutSubviews() {
@@ -50,71 +61,84 @@ final class VideoPlaybackView: UIView {
         CATransaction.setDisableActions(true)
         playerLayer.frame = bounds
         CATransaction.commit()
-        button.sizeToFit()
-        button.center = CGPoint(x: bounds.midX, y: bounds.midY)
-        spinner.center = button.center
+        spinner.center = CGPoint(x: bounds.midX, y: bounds.midY)
     }
 
-    /// 只让播放按钮接收触摸，其余交给查看器（单击切换顶部栏、下拉关闭等）
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        let hit = super.hitTest(point, with: event)
-        return hit === self ? nil : hit
+    func toggle() {
+        isPlaying ? pause() : play()
+    }
+
+    func play() {
+        withPlayer { [weak self] player in
+            guard let self else { return }
+            // 停在结尾时从头播
+            if self.duration > 0, self.currentTime >= self.duration - 0.05 {
+                player.seek(to: .zero)
+            }
+            player.play()
+            self.isPlaying = true
+            self.onStateChange?()
+        }
     }
 
     func pause() {
         player?.pause()
-        setPlaying(false)
+        guard isPlaying else { return }
+        isPlaying = false
+        onStateChange?()
     }
 
-    private func togglePlayback() {
-        if isPlaying {
-            pause()
-            return
+    /// 拖进度条：边拖边看画面（不精确对齐、快），松手时精确对齐一次
+    func seek(to seconds: Double, precise: Bool) {
+        withPlayer { player in
+            let time = CMTime(seconds: max(seconds, 0), preferredTimescale: 600)
+            let tolerance: CMTime = precise ? .zero : CMTime(seconds: 0.1, preferredTimescale: 600)
+            player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance)
         }
+    }
+
+    /// 第一次用到时才建播放器（先确保原文件已下载）
+    private func withPlayer(_ action: @escaping (AVPlayer) -> Void) {
         if let player {
-            player.play()
-            setPlaying(true)
+            action(player)
             return
         }
-        button.isHidden = true
+        pendingActions.append { [weak self] in
+            if let player = self?.player { action(player) }
+        }
+        guard !preparing else { return }
+        preparing = true
         spinner.startAnimating()
         Task { [weak self] in
             guard let self else { return }
             let ready = await ImageStore.shared.ensureDownloaded(self.url)
             self.spinner.stopAnimating()
+            self.preparing = false
             guard ready else {
-                self.button.isHidden = false
+                self.pendingActions = []
                 return
             }
             let player = AVPlayer(url: self.url)
             self.player = player
             self.playerLayer.player = player
+            self.timeObserver = player.addPeriodicTimeObserver(
+                forInterval: CMTime(value: 1, timescale: 30), queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.onStateChange?() }
+            }
             self.endObserver = NotificationCenter.default.addObserver(
                 forName: AVPlayerItem.didPlayToEndTimeNotification, object: player.currentItem, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.player?.seek(to: .zero)
-                    self?.setPlaying(false)
+                    guard let self else { return }
+                    self.isPlaying = false
+                    self.onStateChange?()
                 }
             }
-            player.play()
-            self.setPlaying(true)
+            let actions = self.pendingActions
+            self.pendingActions = []
+            actions.forEach { $0() }
         }
-    }
-
-    private func setPlaying(_ playing: Bool) {
-        isPlaying = playing
-        button.isHidden = false
-        var config = button.configuration
-        config?.image = UIImage(systemName: playing ? "pause.fill" : "play.fill",
-                                withConfiguration: UIImage.SymbolConfiguration(pointSize: 22))
-        config?.contentInsets = playing
-            ? NSDirectionalEdgeInsets(top: 18, leading: 18, bottom: 18, trailing: 18)
-            : NSDirectionalEdgeInsets(top: 18, leading: 20, bottom: 18, trailing: 16)
-        button.configuration = config
-        button.accessibilityLabel = playing ? "暂停" : "播放"
-        // 播放中按钮淡到半透明，不挡画面；按下仍可暂停
-        UIView.animate(withDuration: 0.2) { self.button.alpha = playing ? 0.35 : 1 }
     }
 }
 

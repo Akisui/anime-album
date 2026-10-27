@@ -7,6 +7,8 @@ import UIKit
 struct ZoomableImageView: UIViewRepresentable {
     let item: ViewerItem
     let isCurrent: Bool
+    /// 视频：当前页把播放器接到这里，底部控制条 / 暂停标识读它
+    var videoState: ViewerVideoState?
     var onSingleTap: () -> Void
     var onZoomChanged: (Bool) -> Void
     /// 图片加载并完成布局后回调（加载失败也会回调），供过渡层判断何时可无缝让位
@@ -62,14 +64,12 @@ struct ZoomableImageView: UIViewRepresentable {
             coordinator.tiledView = tiled
         }
 
-        // 视频 / 实况照片：播放层叠在封面图上、随图片一起布局；视频不缩放
+        // 视频 / 实况照片：播放层叠在封面图上、随图片一起布局与缩放（视频双击是播放 / 暂停，放大用捏合）
         switch item.media {
         case .video:
-            scrollView.maximumZoomScale = 1
-            let video = VideoPlaybackView(url: item.fileURL)
+            let video = VideoPlaybackView(url: item.fileURL, duration: item.duration)
             video.frame = imageView.bounds
             video.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            imageView.isUserInteractionEnabled = true
             imageView.addSubview(video)
             coordinator.videoView = video
         case .live:
@@ -117,15 +117,21 @@ struct ZoomableImageView: UIViewRepresentable {
         var animatedImage: AnimatedImagePlayer?
         private var playbackIsCurrent: Bool?
 
-        /// 当前页才播动图；翻走时暂停视频、停实况照片
+        /// 当前页才播动图、视频接上控制条；翻走时暂停视频（断开控制条）、停实况照片
         func updatePlayback(isCurrent: Bool) {
             guard playbackIsCurrent != isCurrent else { return }
             playbackIsCurrent = isCurrent
             if isCurrent {
                 animatedImage?.start()
+                if let videoView {
+                    parent.videoState?.attach(videoView, id: parent.item.id)
+                }
             } else {
                 animatedImage?.stop()
-                videoView?.pause()
+                if let videoView {
+                    videoView.pause()
+                    parent.videoState?.detach(videoView)
+                }
                 liveView?.stopPlayback()
             }
         }
@@ -250,6 +256,11 @@ struct ZoomableImageView: UIViewRepresentable {
         }
 
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            // 视频：双击播放 / 暂停（不唤出控制条）
+            if let videoView {
+                videoView.toggle()
+                return
+            }
             guard let scrollView, let imageView else { return }
             if scrollView.zoomScale > 1 {
                 scrollView.setZoomScale(1, animated: true)

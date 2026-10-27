@@ -165,6 +165,8 @@ struct PhotoViewerOverlay: View {
     @AppStorage("viewerReadingOrder") private var readingOrderRaw = ViewerReadingOrder.leftToRight.rawValue
     /// 连续长条模式下查询某张图在屏幕上的位置（关闭过渡的起点）
     @State private var continuousBox = ContinuousStripBox()
+    /// 当前页视频的播放状态（底部控制条、左下角暂停标识读它）
+    @State private var videoState = ViewerVideoState()
 
     /// 每页缩放状态由页面的代理回调维护（含离屏自动复位），跨页切换不丢失
     private var currentPageZoomed: Bool {
@@ -295,14 +297,31 @@ struct PhotoViewerOverlay: View {
                     .offset(y: chromeOffsetY)
                     .allowsHitTesting(chromeInteractive)
                 Spacer(minLength: 0)
-                // 胶片条与顶部 bar 同一套显隐：共读 chromeOpacity（淡出）、滑动式隐藏时向下移出
-                filmstrip
-                    .compositingGroup()
-                    .opacity(chromeOpacity)
-                    .offset(y: (presenter.chromeHidden && chromeSlides) ? Self.filmstripHeight + stableSafeBottom : 0)
-                    .allowsHitTesting(chromeInteractive)
+                // 胶片条（视频时上面再加播放控制条）与顶部 bar 同一套显隐：共读 chromeOpacity（淡出）、滑动式隐藏时向下移出
+                VStack(spacing: Self.videoControlsGap) {
+                    if currentIsVideo {
+                        ViewerVideoControls(state: videoState)
+                            .padding(.horizontal, 12)
+                            .transition(.opacity)
+                    }
+                    filmstrip
+                }
+                .animation(.easeInOut(duration: 0.2), value: currentIsVideo)
+                .compositingGroup()
+                .opacity(chromeOpacity)
+                .offset(y: (presenter.chromeHidden && chromeSlides) ? bottomChromeHeight : 0)
+                .allowsHitTesting(chromeInteractive)
             }
             .ignoresSafeArea()
+
+            // 视频暂停、控制条收起时：左下角的暂停标识
+            ViewerVideoPausedBadge(
+                state: videoState,
+                eligible: currentIsVideo && presenter.chromeHidden && phase == .presented)
+                .padding(.leading, 16)
+                .padding(.bottom, stableSafeBottom + 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .ignoresSafeArea()
         }
         .confirmationDialog(
             pendingDeletion?.page != nil ? "删除这个 PDF？" : "删除这张照片？",
@@ -367,6 +386,18 @@ struct PhotoViewerOverlay: View {
             }
         }
         #endif
+    }
+
+    private static let videoControlsGap: CGFloat = 8
+
+    private var currentIsVideo: Bool {
+        currentItem.media == .video && readingOrder != .continuous
+    }
+
+    /// 底部整块（胶片条 + 视频控制条）的高度：滑动式隐藏时下移这么多
+    private var bottomChromeHeight: CGFloat {
+        Self.filmstripHeight + stableSafeBottom
+            + (currentIsVideo ? ViewerVideoControls.height + Self.videoControlsGap : 0)
     }
 
     /// 滑动式隐藏保持不透明（靠 offset 移出）；淡出式隐藏降到 0。拖拽期间压住。
@@ -476,6 +507,7 @@ struct PhotoViewerOverlay: View {
         ZoomableImageView(
             item: item,
             isCurrent: offset == index,
+            videoState: videoState,
             onSingleTap: {
                 // 单击：图片侵入 bar 区域时用滑动式（滑开露出图片），
                 // 否则（bar 处无图片）用淡入淡出
