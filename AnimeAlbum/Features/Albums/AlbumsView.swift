@@ -12,6 +12,7 @@ struct AlbumsView: View {
     @State private var renameText = ""
     @State private var albumsPendingDeletion: [Album] = []
     @State private var navigationPath = NavigationPath()
+    @State private var appearanceGate = AppearanceGate()
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -163,22 +164,32 @@ struct AlbumsView: View {
             .padding(.top, 4)
             .padding(.bottom, 24)
         }
+        .background { AppearanceGateView(gate: appearanceGate).frame(width: 0, height: 0) }
     }
 
     private func open(_ album: Album) {
-        // 明确带动画推入：偶尔按下的事务里动画被禁掉，相簿页直接出现、没有从右往左的过渡（用户反馈）
-        var transaction = Transaction(animation: .default)
-        transaction.disablesAnimations = false
         #if DEBUG
         PushDiagnostics.shared.albumTapped(album.name)
-        // PUSH_NO_ANIM=1：故意不带动画推入（验证推入诊断能分辨出来）
-        if ProcessInfo.processInfo.environment["PUSH_NO_ANIM"] == "1" {
-            transaction = Transaction()
-            transaction.disablesAnimations = true
+        if !appearanceGate.hasAppeared {
+            PushDiagnostics.shared.note("  相簿列表还没出现完成，推入排到出现完成时")
         }
         #endif
-        withTransaction(transaction) {
-            navigationPath.append(album)
+        // 第一次切到相簿 Tab 后约 0.7s 内，相簿列表还没「出现完成」，这时推入系统不加动画、相簿页直接出现（真机诊断 + 模拟器复现）。
+        // 这段时间里点的先排着，出现完成时再推入
+        appearanceGate.run {
+            // 明确带动画推入
+            var transaction = Transaction(animation: .default)
+            transaction.disablesAnimations = false
+            #if DEBUG
+            // PUSH_NO_ANIM=1：故意不带动画推入（验证推入诊断能分辨出来）
+            if ProcessInfo.processInfo.environment["PUSH_NO_ANIM"] == "1" {
+                transaction = Transaction()
+                transaction.disablesAnimations = true
+            }
+            #endif
+            withTransaction(transaction) {
+                navigationPath.append(album)
+            }
         }
     }
 
@@ -350,5 +361,65 @@ struct PressableCardStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.97 : 1)
             .opacity(configuration.isPressed && reduceMotion ? 0.7 : 1)
             .animation(.spring(response: 0.3, dampingFraction: 1), value: configuration.isPressed)
+    }
+}
+
+/// 页面第一次「出现完成」（viewDidAppear）之前要做的事排到那时再做。
+/// 第一次切到某个 Tab 时，iOS 18 的 Tab 切换过渡里才现搭这一页的导航，到它出现完成（约 0.7s，比看得见的交叉淡化长得多）之前
+/// 推入会被系统直接跳过动画；第二次以后切过去没有这个问题（实测）
+@MainActor
+final class AppearanceGate {
+    private(set) var hasAppeared = false
+    private var pending: (() -> Void)?
+
+    /// 已出现完成就立即执行；否则排着（只留最后一次），出现完成时执行，最晚 1s 后兜底执行
+    func run(_ action: @escaping () -> Void) {
+        if hasAppeared {
+            action()
+            return
+        }
+        pending = action
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.flush()
+        }
+    }
+
+    fileprivate func didAppear() {
+        hasAppeared = true
+        flush()
+    }
+
+    private func flush() {
+        let action = pending
+        pending = nil
+        action?()
+    }
+}
+
+/// 把所在页面的 viewDidAppear 转给 AppearanceGate（作为子控制器，随所在页面一起收到出现回调）
+struct AppearanceGateView: UIViewControllerRepresentable {
+    let gate: AppearanceGate
+
+    func makeUIViewController(context: Context) -> Controller {
+        Controller(gate: gate)
+    }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+
+    final class Controller: UIViewController {
+        private let gate: AppearanceGate
+
+        init(gate: AppearanceGate) {
+            self.gate = gate
+            super.init(nibName: nil, bundle: nil)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            gate.didAppear()
+        }
     }
 }
