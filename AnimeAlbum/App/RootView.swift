@@ -20,17 +20,23 @@ struct RootView: View {
     @State private var selectionBarPresenter = SelectionBarPresenter()
     /// 启动后在屏幕外预先搭一遍相簿页（见 albumPagePrewarm）
     @State private var prewarmAlbum: Album?
+    /// 打开 App 默认落在相簿页（用户要求）
     @State private var selectedTab: RootTab = {
         #if DEBUG
-        // 调试辅助：INITIAL_TAB=albums 直接落在相簿页，方便自动化截图
-        if ProcessInfo.processInfo.environment["INITIAL_TAB"] == "albums" {
-            return .albums
-        }
-        if ProcessInfo.processInfo.environment["INITIAL_TAB"] == "settings" {
-            return .settings
+        // 调试辅助：INITIAL_TAB=library|albums|settings 指定启动页；没指定时，图库专用的调试开关（自动打开查看器等）从图库启动
+        let env = ProcessInfo.processInfo.environment
+        switch env["INITIAL_TAB"] {
+        case "library": return .library
+        case "albums": return .albums
+        case "settings": return .settings
+        default:
+            let libraryKeys = ["OPEN_VIEWER", "OPEN_INDEX", "OPEN_PDF", "PDF_PAGE", "AUTO_SELECT", "AUTO_CYCLES", "SWITCH_TO_ALBUMS"]
+            if libraryKeys.contains(where: { env[$0] != nil }) {
+                return .library
+            }
         }
         #endif
-        return .library
+        return .albums
     }()
 
     var body: some View {
