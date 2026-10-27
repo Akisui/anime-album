@@ -13,6 +13,7 @@ struct AlbumsView: View {
     @State private var albumsPendingDeletion: [Album] = []
     @State private var navigationPath = NavigationPath()
     @State private var appearanceGate = AppearanceGate()
+    @State private var navItemsMotion = NavBarItemsMotion()
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -164,7 +165,10 @@ struct AlbumsView: View {
             .padding(.top, 4)
             .padding(.bottom, 24)
         }
-        .background { AppearanceGateView(gate: appearanceGate).frame(width: 0, height: 0) }
+        .background {
+            AppearanceGateView(gate: appearanceGate).frame(width: 0, height: 0)
+            NavBarItemsMotion.PageProbe(motion: navItemsMotion).frame(width: 0, height: 0)
+        }
     }
 
     private func open(_ album: Album) {
@@ -199,13 +203,18 @@ struct AlbumsView: View {
         if isSelecting {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("取消") { exitSelectionMode() }
+                    .background { NavBarItemsMotion.ItemProbe(motion: navItemsMotion) }
             }
         } else {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if !albums.isEmpty {
-                    Button("选择") { enterSelectionMode() }
+            // 合成一项（原因见 AlbumDetailView.toolbarContent），随页面一起滑动（NavBarItemsMotion）
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 19) {
+                    if !albums.isEmpty {
+                        Button("选择") { enterSelectionMode() }
+                    }
+                    Button("新建相簿", systemImage: "plus") { promptNewAlbum() }
                 }
-                Button("新建相簿", systemImage: "plus") { promptNewAlbum() }
+                .background { NavBarItemsMotion.ItemProbe(motion: navItemsMotion) }
             }
         }
     }

@@ -17,6 +17,7 @@ struct AlbumDetailView: View {
     @State private var showingFileImporter = false
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var frameBox = GridFrameBox()
+    @State private var navItemsMotion = NavBarItemsMotion()
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -109,6 +110,8 @@ struct AlbumDetailView: View {
             }
         }
         #endif
+        // 导航栏右侧按钮随这一页滑动（NavBarItemsMotion）
+        .background { NavBarItemsMotion.PageProbe(motion: navItemsMotion).frame(width: 0, height: 0) }
         .navigationTitle(album.name)
         .navigationBarTitleDisplayMode(.inline)
         // 选择中不能返回（底部栏属于这一页），与原生一致：先「取消」再离开
@@ -240,10 +243,11 @@ struct AlbumDetailView: View {
         if isSelecting {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("取消") { exitSelectionMode() }
+                    .background { NavBarItemsMotion.ItemProbe(motion: navItemsMotion) }
             }
         } else {
             // 两个按钮合成一个导航栏项：分成两项时，推入过渡中系统只显示第一项、第二项等滑入结束才冒出来（iOS 18 实测，
-            // 与按钮种类无关）。间距 19 与相簿列表页的两个独立项（「选择」「+」）位置逐像素重合，推入交叉淡化时不重影
+            // 与按钮种类无关）。间距 19 = 系统两个独立项的间距。整项随页面滑动（NavBarItemsMotion）
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 19) {
                     // 按查询结果判断、不看 photos：推入期间 photos 还是空的（showsContent）
@@ -256,6 +260,7 @@ struct AlbumDetailView: View {
                         Label("添加照片", systemImage: "plus")
                     }
                 }
+                .background { NavBarItemsMotion.ItemProbe(motion: navItemsMotion) }
             }
         }
     }
