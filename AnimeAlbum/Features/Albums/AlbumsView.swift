@@ -1,10 +1,31 @@
 import SwiftData
 import SwiftUI
 
+/// 相簿列表：显示选项（隐藏相簿）放在这一层，变了就按新条件重建下面那页的查询
 struct AlbumsView: View {
+    @State private var filter: HiddenFilter = .visible
+
+    var body: some View {
+        AlbumsPage(filter: $filter)
+    }
+}
+
+private struct AlbumsPage: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(SelectionBarPresenter.self) private var selectionBarPresenter
-    @Query(sort: \Album.sortIndex) private var albums: [Album]
+    @Binding var filter: HiddenFilter
+    @Query private var albums: [Album]
+
+    init(filter: Binding<HiddenFilter>) {
+        _filter = filter
+        var predicate: Predicate<Album>?
+        switch filter.wrappedValue {
+        case .visible: predicate = #Predicate { $0.isHidden == false }
+        case .hiddenOnly: predicate = #Predicate { $0.isHidden == true }
+        case .all: predicate = nil
+        }
+        _albums = Query(filter: predicate, sort: \Album.sortIndex)
+    }
 
     @State private var showingNewAlbum = false
     @State private var newAlbumName = ""
@@ -24,7 +45,10 @@ struct AlbumsView: View {
     var body: some View {
         NavigationStack(path: $navigationPath) {
             Group {
-                if albums.isEmpty {
+                if albums.isEmpty, filter == .hiddenOnly {
+                    ContentUnavailableView("没有隐藏的相簿", systemImage: "eye.slash",
+                                           description: Text("长按相簿选「隐藏相簿」。"))
+                } else if albums.isEmpty {
                     ContentUnavailableView {
                         Label("没有相簿", systemImage: "rectangle.stack")
                     } description: {
@@ -40,11 +64,13 @@ struct AlbumsView: View {
             }
             .navigationTitle("相簿")
             .navigationDestination(for: Album.self) { album in
-                AlbumDetailView(album: album)
+                AlbumDetailScreen(album: album)
             }
             .toolbar { toolbarContent }
             .onChange(of: selectedIDs) {
-                selectionBarPresenter.update(count: selectedIDs.count)
+                selectionBarPresenter.update(
+                    count: selectedIDs.count,
+                    allHidden: !selectedIDs.isEmpty && selectedAlbums.allSatisfy(\.isHidden))
             }
             .onChange(of: albums.isEmpty) { _, isEmpty in
                 if isEmpty, isSelecting {
@@ -142,7 +168,8 @@ struct AlbumsView: View {
                             open(album)
                         }
                     } label: {
-                        AlbumCard(album: album, isSelected: isSelecting && selectedIDs.contains(album.id))
+                        AlbumCard(album: album, isSelected: isSelecting && selectedIDs.contains(album.id),
+                                  showsHidden: filter.showsHidden, marksHidden: filter == .all)
                     }
                     .buttonStyle(PressableCardStyle())
                     .hoverEffect(.highlight)
@@ -153,6 +180,11 @@ struct AlbumsView: View {
                             Button("重命名", systemImage: "pencil") {
                                 renameText = album.name
                                 renamingAlbum = album
+                            }
+                            Button(album.isHidden ? "取消隐藏" : "隐藏相簿",
+                                   systemImage: album.isHidden ? "eye" : "eye.slash") {
+                                album.isHidden.toggle()
+                                try? modelContext.save()
                             }
                             Button("删除相簿", systemImage: "trash", role: .destructive) {
                                 albumsPendingDeletion = [album]
@@ -209,6 +241,7 @@ struct AlbumsView: View {
             // 合成一项（原因见 AlbumDetailView.toolbarContent），随页面一起滑动（NavBarItemsMotion）
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 19) {
+                    HiddenFilterMenu(filter: $filter)
                     if !albums.isEmpty {
                         Button("选择") { enterSelectionMode() }
                     }
@@ -230,8 +263,21 @@ struct AlbumsView: View {
         isSelecting = true
         // 底部栏由 RootView 顶层渲染（覆盖 Tab 栏）；选相簿时只有删除
         selectionBarPresenter.beginAlbums {
-            albumsPendingDeletion = albums.filter { selectedIDs.contains($0.id) }
+            albumsPendingDeletion = selectedAlbums
+        } onToggleHidden: {
+            // 选中的全部已隐藏 → 都取消隐藏；否则都隐藏
+            let selected = selectedAlbums
+            let hide = !selected.allSatisfy(\.isHidden)
+            for album in selected {
+                album.isHidden = hide
+            }
+            try? modelContext.save()
+            exitSelectionMode()
         }
+    }
+
+    private var selectedAlbums: [Album] {
+        albums.filter { selectedIDs.contains($0.id) }
     }
 
     private func exitSelectionMode() {
@@ -283,12 +329,16 @@ struct AlbumsView: View {
 struct AlbumCard: View {
     let album: Album
     var isSelected = false
+    /// 看得到隐藏内容时，隐藏照片也可以做封面、计入数量；否则跳过
+    var showsHidden = false
+    /// 隐藏的相簿在名字前标一个划掉的眼睛（「全部显示」时）
+    var marksHidden = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            AlbumCoverView(photo: album.coverPhoto)
+            AlbumCoverView(photo: album.coverPhoto(includingHidden: showsHidden))
                 // 勾选态与照片网格一致：白色薄罩 + 右下角徽标
                 .overlay {
                     if isSelected {
@@ -304,12 +354,20 @@ struct AlbumCard: View {
                     }
                 }
                 .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 1), value: isSelected)
-            Text(album.name)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .padding(.top, 8)
-            Text("\(album.photoCount) 张")
+            HStack(spacing: 4) {
+                if marksHidden, album.isHidden {
+                    Image(systemName: "eye.slash")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("已隐藏")
+                }
+                Text(album.name)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .padding(.top, 8)
+            Text("\(album.photoCount(includingHidden: showsHidden)) 张")
                 .font(.subheadline)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)

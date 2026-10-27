@@ -24,6 +24,9 @@ final class SelectionBarPresenter {
         let onDelete: () -> Void
         var onNewAlbum: ([Photo]) -> Void = { _ in }
         var onAdded: () -> Void = {}
+        /// 隐藏 / 取消隐藏选中的（全部已隐藏时为取消隐藏）
+        var onToggleHidden: () -> Void = {}
+        var allHidden = false
     }
 
     private(set) var session: Session?
@@ -32,24 +35,27 @@ final class SelectionBarPresenter {
         excludingAlbum albumID: UUID? = nil,
         onDelete: @escaping () -> Void,
         onNewAlbum: @escaping ([Photo]) -> Void,
-        onAdded: @escaping () -> Void
+        onAdded: @escaping () -> Void,
+        onToggleHidden: @escaping () -> Void
     ) {
         session = Session(
             kind: .photos(excludedAlbumID: albumID),
-            onDelete: onDelete, onNewAlbum: onNewAlbum, onAdded: onAdded)
+            onDelete: onDelete, onNewAlbum: onNewAlbum, onAdded: onAdded, onToggleHidden: onToggleHidden)
     }
 
-    func beginAlbums(onDelete: @escaping () -> Void) {
-        session = Session(kind: .albums, onDelete: onDelete)
+    func beginAlbums(onDelete: @escaping () -> Void, onToggleHidden: @escaping () -> Void) {
+        session = Session(kind: .albums, onDelete: onDelete, onToggleHidden: onToggleHidden)
     }
 
     func update(photos: [Photo]) {
         session?.photos = photos
         session?.count = photos.count
+        session?.allHidden = !photos.isEmpty && photos.allSatisfy(\.isHidden)
     }
 
-    func update(count: Int) {
+    func update(count: Int, allHidden: Bool) {
         session?.count = count
+        session?.allHidden = allHidden
     }
 
     func end() {
@@ -103,6 +109,15 @@ struct SelectionBarOverlay: View {
                     .accessibilityLabel("添加到相簿")
                     .disabled(session.count == 0)
                 }
+                Button {
+                    session.onToggleHidden()
+                } label: {
+                    Image(systemName: session.allHidden ? "eye" : "eye.slash")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel(session.allHidden ? "取消隐藏" : "隐藏")
+                .disabled(session.count == 0)
                 Button {
                     session.onDelete()
                 } label: {

@@ -16,6 +16,7 @@ struct RootView: View {
     @State private var newAlbumName = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(PrivacyLock.self) private var privacyLock
     @State private var viewerPresenter = ViewerPresenter()
     @State private var selectionBarPresenter = SelectionBarPresenter()
     /// 启动后在屏幕外预先搭一遍相簿页（见 albumPagePrewarm）
@@ -45,6 +46,18 @@ struct RootView: View {
             .environment(viewerPresenter)
             .environment(selectionBarPresenter)
             .task { await launchTasks() }
+            // 打开时验证：锁着时盖住全部内容；离开前台（多任务切换器的截图）时也盖住
+            .overlay {
+                if privacyLock.requiresAuthToOpen,
+                   !privacyLock.isAppUnlocked || (scenePhase != .active && !privacyLock.isAuthenticating) {
+                    AppLockScreen()
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background {
+                    privacyLock.didEnterBackground()
+                }
+            }
             #if DEBUG
             .onChange(of: scenePhase, initial: true) { _, phase in
                 PushDiagnostics.shared.note("scenePhase \(phase)")
@@ -67,10 +80,11 @@ struct RootView: View {
             // .defaultVisibility(.hidden, for: .tabBar) 在 iPhone 底部 Tab 栏上都不生效，相簿会变成一个个 Tab（实测）
             if horizontalSizeClass == .regular {
                 TabSection("我的相簿") {
-                    ForEach(albums) { album in
+                    // 隐藏的相簿只在隐藏内容解锁后列出
+                    ForEach(albums.filter { !$0.isHidden || privacyLock.isHiddenUnlocked }) { album in
                         Tab(album.name, systemImage: "rectangle.stack", value: RootTab.album(album.id)) {
                             NavigationStack {
-                                AlbumDetailView(album: album)
+                                AlbumDetailScreen(album: album)
                             }
                         }
                         .tabPlacement(.sidebarOnly)
@@ -182,7 +196,7 @@ struct RootView: View {
     private var albumPagePrewarm: some View {
         if let prewarmAlbum {
             NavigationStack {
-                AlbumDetailView(album: prewarmAlbum)
+                AlbumDetailScreen(album: prewarmAlbum)
             }
             .environment(\.isPrewarmCopy, true)
             .frame(width: 390, height: 700)

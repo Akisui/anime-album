@@ -26,6 +26,8 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
     var allowsReordering = true
     /// 进入时定位到最新（底部），停在底部时新增内容后仍保持在底部（图库）
     var anchorsToBottom = false
+    /// 给隐藏的照片打标记（显示选项为「全部显示」时）
+    var marksHidden = false
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -262,6 +264,7 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
                 [weak self] cell, _, photoID in
                 cell.configure(photoID: photoID, kind: self?.thumbnailKind ?? .small)
                 cell.setBadge(self?.badges[photoID])
+                cell.setHiddenMark(self?.markedHidden.contains(photoID) ?? false)
                 cell.setChecked(self?.isChecked(photoID) ?? false, animated: false)
                 cell.isHidden = photoID == self?.hiddenPhotoID
             }
@@ -290,11 +293,16 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
 
         /// 格子角标（PDF 页数、视频时长、GIF）
         private var badges: [UUID: CellBadge] = [:]
+        /// 打了隐藏标记的照片
+        private var markedHidden: Set<UUID> = []
 
         func update(photos: [Photo]) {
             badges = Dictionary(
                 photos.compactMap { photo in CellBadge.of(photo).map { (photo.id, $0) } },
                 uniquingKeysWith: { first, _ in first })
+            let marked = parent.marksHidden ? Set(photos.filter(\.isHidden).map(\.id)) : []
+            let markChanged = marked.symmetricDifference(markedHidden)
+            markedHidden = marked
             aspectRatios = photos.map { $0.height > 0 ? CGFloat($0.width) / CGFloat($0.height) : 1 }
             if let aspectLayout = collectionView?.collectionViewLayout as? PhotoAspectListLayout,
                aspectLayout.aspectRatios != aspectRatios {
@@ -302,6 +310,15 @@ struct ReorderablePhotoGrid: UIViewRepresentable {
             }
             let ids = photos.map(\.id)
             reloadEditedPhotos(photos)
+            // 隐藏标记变了的格子就地重配（显示选项切换、或隐藏 / 取消隐藏后仍留在网格里的）
+            if !markChanged.isEmpty {
+                var snapshot = dataSource.snapshot()
+                let present = markChanged.filter { snapshot.indexOfItem($0) != nil }
+                if !present.isEmpty {
+                    snapshot.reconfigureItems(Array(present))
+                    dataSource.apply(snapshot, animatingDifferences: false)
+                }
+            }
             guard ids != dataSource.snapshot().itemIdentifiers else { return }
 
             var snapshot = NSDiffableDataSourceSnapshot<Int, UUID>()

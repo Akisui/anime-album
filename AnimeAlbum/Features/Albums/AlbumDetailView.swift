@@ -2,8 +2,19 @@ import PhotosUI
 import SwiftData
 import SwiftUI
 
+/// 相簿详情：显示选项（隐藏照片）放在这一层，变了就按新条件重建下面那页的查询
+struct AlbumDetailScreen: View {
+    let album: Album
+    @State private var filter: HiddenFilter = .visible
+
+    var body: some View {
+        AlbumDetailView(album: album, filter: $filter)
+    }
+}
+
 struct AlbumDetailView: View {
     let album: Album
+    @Binding var filter: HiddenFilter
 
     @Environment(\.modelContext) private var modelContext
     @Environment(ViewerPresenter.self) private var viewerPresenter
@@ -30,11 +41,21 @@ struct AlbumDetailView: View {
     /// 1500 张的相簿每次刷新 110～230ms，第一次进相簿时刷新好几次，推入动画被吃掉，采样实测）
     @Query private var entries: [AlbumEntry]
 
-    init(album: Album) {
+    init(album: Album, filter: Binding<HiddenFilter>) {
         self.album = album
+        _filter = filter
         let albumID = album.id
+        let predicate: Predicate<AlbumEntry>
+        switch filter.wrappedValue {
+        case .visible:
+            predicate = #Predicate { $0.album?.id == albumID && $0.photo?.isHidden == false }
+        case .hiddenOnly:
+            predicate = #Predicate { $0.album?.id == albumID && $0.photo?.isHidden == true }
+        case .all:
+            predicate = #Predicate { $0.album?.id == albumID }
+        }
         var descriptor = FetchDescriptor<AlbumEntry>(
-            predicate: #Predicate { $0.album?.id == albumID },
+            predicate: predicate,
             sortBy: [SortDescriptor(\.sortIndex)])
         descriptor.relationshipKeyPathsForPrefetching = [\.photo]
         _entries = Query(descriptor)
@@ -57,49 +78,7 @@ struct AlbumDetailView: View {
         #if DEBUG
         let _ = isPrewarmCopy ? () : Self.debugStall(at: "body")
         #endif
-        Group {
-            if !showsContent {
-                Color(.systemBackground)
-            } else if photos.isEmpty {
-                ContentUnavailableView {
-                    Label("相簿是空的", systemImage: "photo.on.rectangle.angled")
-                } description: {
-                    Text("从图库挑选照片放进这个相簿。")
-                } actions: {
-                    Menu {
-                        addMenuItems
-                    } label: {
-                        Text("添加照片")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.capsule)
-                }
-            } else {
-                #if DEBUG
-                let _ = isPrewarmCopy ? () : Self.debugStall(at: "content")
-                #endif
-                // UICollectionView 桥接：拖拽排序 + 捏合缩放列数 + Context Menu + 选择模式（DESIGN.md §6.4）
-                ReorderablePhotoGrid(
-                    photos: photos,
-                    onTap: { index in
-                        // PDF 也在查看器里按页看（见 ViewerItem）
-                        let box = frameBox
-                        viewerPresenter.present(
-                            photos: photos, index: index,
-                            sourceFrame: { box.lookup?($0) },
-                            sourceVisibleRect: { box.visibleRect?() })
-                    },
-                    onMove: { photoID, destination in
-                        AlbumOperations.move(photoID: photoID, toIndex: destination, in: album, context: modelContext)
-                    },
-                    contextMenu: { cellContextMenu(for: $0) },
-                    frameBox: frameBox,
-                    viewerPresenter: viewerPresenter,
-                    isSelecting: isSelecting,
-                    selectedIDs: $selectedIDs
-                )
-            }
-        }
+        content
         #if DEBUG
         .background {
             if !isPrewarmCopy {
@@ -203,6 +182,56 @@ struct AlbumDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private var content: some View {
+        if !showsContent {
+            Color(.systemBackground)
+        } else if photos.isEmpty, filter == .hiddenOnly {
+            ContentUnavailableView("没有隐藏的照片", systemImage: "eye.slash",
+                                   description: Text("这个相簿里没有隐藏的照片。"))
+        } else if photos.isEmpty {
+            ContentUnavailableView {
+                Label("相簿是空的", systemImage: "photo.on.rectangle.angled")
+            } description: {
+                Text("从图库挑选照片放进这个相簿。")
+            } actions: {
+                Menu {
+                    addMenuItems
+                } label: {
+                    Text("添加照片")
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+            }
+        } else {
+            #if DEBUG
+            let _ = isPrewarmCopy ? () : Self.debugStall(at: "content")
+            #endif
+            // UICollectionView 桥接：拖拽排序 + 捏合缩放列数 + Context Menu + 选择模式（DESIGN.md §6.4）
+            ReorderablePhotoGrid(
+                photos: photos,
+                onTap: { index in
+                    // PDF 也在查看器里按页看（见 ViewerItem）
+                    let box = frameBox
+                    viewerPresenter.present(
+                        photos: photos, index: index,
+                        sourceFrame: { box.lookup?($0) },
+                        sourceVisibleRect: { box.visibleRect?() },
+                        hiddenFilter: filter)
+                },
+                onMove: { photoID, destination in
+                    AlbumOperations.move(photoID: photoID, toIndex: destination, in: album, context: modelContext)
+                },
+                contextMenu: { cellContextMenu(for: $0) },
+                frameBox: frameBox,
+                viewerPresenter: viewerPresenter,
+                isSelecting: isSelecting,
+                selectedIDs: $selectedIDs,
+                marksHidden: filter == .all
+            )
+        }
+    }
+
     #if DEBUG
     /// PUSH_STALL=毫秒 PUSH_STALL_AT=body|appear：第一次进相簿时在指定位置卡住主线程（模拟真机首次搭页慢）
     private static var stalled = false
@@ -227,12 +256,26 @@ struct AlbumDetailView: View {
                 album.coverPhotoID = photoID
                 try? modelContext.save()
             },
+            GridMenuItem(title: hiddenTitle(photoID), systemImage: hiddenImage(photoID)) {
+                if let photo = photos.first(where: { $0.id == photoID }) {
+                    photo.isHidden.toggle()
+                    try? modelContext.save()
+                }
+            },
             GridMenuItem(title: "从相簿中移除", systemImage: "rectangle.stack.badge.minus", isDestructive: true) {
                 if let photo = photos.first(where: { $0.id == photoID }) {
                     AlbumOperations.remove(photo, from: album, in: modelContext)
                 }
             },
         ]
+    }
+
+    private func hiddenTitle(_ photoID: UUID) -> String {
+        photos.first { $0.id == photoID }?.isHidden == true ? "取消隐藏" : "隐藏"
+    }
+
+    private func hiddenImage(_ photoID: UUID) -> String {
+        photos.first { $0.id == photoID }?.isHidden == true ? "eye" : "eye.slash"
     }
 
     // MARK: - 工具栏
@@ -250,6 +293,7 @@ struct AlbumDetailView: View {
             // 与按钮种类无关）。间距 19 = 系统两个独立项的间距。整项随页面滑动（NavBarItemsMotion）
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 19) {
+                    HiddenFilterMenu(filter: $filter)
                     // 按查询结果判断、不看 photos：推入期间 photos 还是空的（showsContent）
                     if !entries.isEmpty {
                         Button("选择") { enterSelectionMode() }
@@ -305,7 +349,17 @@ struct AlbumDetailView: View {
                 photosPendingRemoval = selectionBarPresenter.session?.photos ?? []
             },
             onNewAlbum: { promptNewAlbum(with: $0) },
-            onAdded: { exitSelectionMode() })
+            onAdded: { exitSelectionMode() },
+            onToggleHidden: { [selectionBarPresenter] in
+                // 选中的全部已隐藏 → 都取消隐藏；否则都隐藏
+                let selected = selectionBarPresenter.session?.photos ?? []
+                let hide = !selected.allSatisfy(\.isHidden)
+                for photo in selected {
+                    photo.isHidden = hide
+                }
+                try? modelContext.save()
+                exitSelectionMode()
+            })
     }
 
     private func exitSelectionMode() {

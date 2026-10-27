@@ -22,6 +22,8 @@ struct ViewerItem: Identifiable, Hashable {
     var pairedVideoPath: String?
     /// 视频时长（秒）
     var duration: Double = 0
+    /// 隐藏（「…」菜单显示「隐藏 / 取消隐藏」；查看器里切换后就地更新）
+    var isHidden = false
 
     /// 轻量标识（不要拼字符串）：翻页器 / 胶片条每次刷新都要把所有页的 id 算一遍并比较，
     /// 拼字符串在几千张的图库里每次刷新多花几毫秒，翻页时一卡一卡（实测）
@@ -48,16 +50,16 @@ struct ViewerItem: Identifiable, Hashable {
             return [ViewerItem(photoID: photo.id, page: nil, pageCount: 0, aspectRatio: photoAspect,
                                isVectorPage: false, revision: photo.editRevision, media: photo.kind,
                                filePath: photo.fileRelativePath, pairedVideoPath: photo.pairedVideoRelativePath,
-                               duration: photo.duration)]
+                               duration: photo.duration, isHidden: photo.isHidden)]
         }
         let pages = PDFPageStore.shared.pages(photoID: photo.id)
         guard !pages.isEmpty else {
             return [ViewerItem(photoID: photo.id, page: 0, pageCount: 1, aspectRatio: photoAspect,
-                               isVectorPage: true, revision: photo.editRevision)]
+                               isVectorPage: true, revision: photo.editRevision, isHidden: photo.isHidden)]
         }
         return pages.enumerated().map { index, info in
             ViewerItem(photoID: photo.id, page: index, pageCount: pages.count, aspectRatio: info.aspectRatio,
-                       isVectorPage: info.kind == .vector, revision: photo.editRevision)
+                       isVectorPage: info.kind == .vector, revision: photo.editRevision, isHidden: photo.isHidden)
         }
     }
 

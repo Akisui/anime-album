@@ -93,6 +93,27 @@ final class PhotoCollectionCell: UICollectionViewCell {
         setNeedsLayout()
     }
 
+    /// 隐藏照片的标记（「全部显示」时用）：左上角一个划掉的眼睛，懒创建
+    private var hiddenMark: UIImageView?
+
+    func setHiddenMark(_ marked: Bool) {
+        guard marked || hiddenMark != nil else { return }
+        let mark = hiddenMark ?? {
+            let view = UIImageView(image: UIImage(
+                systemName: "eye.slash.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)))
+            view.tintColor = .white
+            view.layer.shadowColor = UIColor.black.cgColor
+            view.layer.shadowOpacity = 0.5
+            view.layer.shadowRadius = 1.5
+            view.layer.shadowOffset = .zero
+            contentView.addSubview(view)
+            hiddenMark = view
+            return view
+        }()
+        mark.isHidden = !marked
+        setNeedsLayout()
+    }
+
     private func showChip(_ text: String) {
         let label = documentBadge ?? makeDocumentBadge()
         label.text = text
@@ -164,6 +185,11 @@ final class PhotoCollectionCell: UICollectionViewCell {
             documentBadge.alpha = size.width >= 48 ? 1 : 0
             let textSize = documentBadge.intrinsicContentSize
             documentBadge.frame = CGRect(x: 4, y: size.height - 4 - 16, width: textSize.width + 10, height: 16)
+        }
+        if let hiddenMark, !hiddenMark.isHidden {
+            hiddenMark.alpha = size.width >= 48 ? 1 : 0
+            hiddenMark.sizeToFit()
+            hiddenMark.frame.origin = CGPoint(x: 5, y: 5)
         }
         badgeScale = min(1, max(0.5, size.width / 72))
         guard let badge else { return }

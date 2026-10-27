@@ -4,6 +4,9 @@
 <dict>
 	<!-- 其余键由 GENERATE_INFOPLIST_FILE 生成；这里只放生成不了的：
 	     CloudKit 静默推送（其他设备改了数据时在后台拉取） -->
+	<!-- 打开时验证 / 查看隐藏内容时验证（设置 › 隐私） -->
+	<key>NSFaceIDUsageDescription</key>
+	<string>用面容 ID 解锁角色相册和查看隐藏的照片。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>

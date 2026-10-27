@@ -6,6 +6,7 @@ struct AnimeAlbumApp: App {
     let container: ModelContainer
     @State private var commandCenter = AppCommandCenter()
     @State private var cloudSync: CloudSyncSettings
+    @State private var privacyLock = PrivacyLock()
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
 
     init() {
@@ -44,6 +45,7 @@ struct AnimeAlbumApp: App {
             RootView()
                 .environment(commandCenter)
                 .environment(cloudSync)
+                .environment(privacyLock)
                 .preferredColorScheme(AppearanceMode(rawValue: appearanceRaw)?.colorScheme)
         }
         .modelContainer(container)

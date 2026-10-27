@@ -29,11 +29,14 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
     @Environment(CloudSyncSettings.self) private var cloudSync
+    @Environment(PrivacyLock.self) private var privacyLock
 
     var body: some View {
         NavigationStack {
             Form {
                 iCloudSection
+
+                privacySection
 
                 Section("外观") {
                     Picker("外观", selection: $appearanceRaw) {
@@ -57,6 +60,29 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
         }
+    }
+
+    /// 两个开关改动（开或关）都要先验证，验证通过才生效
+    private var privacySection: some View {
+        let biometry = privacyLock.biometryName
+        let available = privacyLock.canAuthenticate
+        return Section {
+            Toggle("打开 App 时需要\(biometry)", isOn: Binding(
+                get: { privacyLock.requiresAuthToOpen },
+                set: { enabled in Task { await privacyLock.setRequiresAuthToOpen(enabled) } }))
+            Toggle("查看隐藏内容时需要\(biometry)", isOn: Binding(
+                get: { privacyLock.requiresAuthForHidden },
+                set: { enabled in Task { await privacyLock.setRequiresAuthForHidden(enabled) } }))
+        } header: {
+            Text("隐私")
+        } footer: {
+            if available {
+                Text("「查看隐藏内容」指在图库、相簿列表或相簿里把显示选项切到「只显示隐藏的」或「全部显示」。离开 App 后，隐藏内容会重新收起。")
+            } else {
+                Text("这台设备没有设置密码，无法开启。")
+            }
+        }
+        .disabled(!available)
     }
 
     @ViewBuilder

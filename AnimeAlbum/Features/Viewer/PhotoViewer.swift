@@ -15,6 +15,8 @@ final class ViewerPresenter {
         /// 网格未被 bar 遮挡的可见区域（全局坐标）：过渡图层按它裁切，
         /// 格子被导航栏/Tab 栏遮住的部分不会在过渡中"穿透"显示到 bar 之上
         let sourceVisibleRect: () -> CGRect?
+        /// 打开时所在页的显示选项：查看器里隐藏 / 取消隐藏后不再符合它的照片从查看器里移走
+        let hiddenFilter: HiddenFilter
     }
 
     private(set) var session: Session?
@@ -55,7 +57,8 @@ final class ViewerPresenter {
     func present(
         photos: [Photo], index: Int, page: Int = 0,
         sourceFrame: @escaping (UUID) -> CGRect?,
-        sourceVisibleRect: @escaping () -> CGRect? = { nil }
+        sourceVisibleRect: @escaping () -> CGRect? = { nil },
+        hiddenFilter: HiddenFilter = .all
     ) {
         guard session == nil, photos.indices.contains(index) else { return }
         let photoID = photos[index].id
@@ -67,7 +70,7 @@ final class ViewerPresenter {
         notifyHiddenPhoto()
         session = Session(
             items: items, initialIndex: first + max(0, min(page, pages - 1)),
-            sourceFrame: sourceFrame, sourceVisibleRect: sourceVisibleRect)
+            sourceFrame: sourceFrame, sourceVisibleRect: sourceVisibleRect, hiddenFilter: hiddenFilter)
     }
 
     func setHiddenPhoto(_ id: UUID?) {
@@ -564,6 +567,7 @@ struct PhotoViewerOverlay: View {
     private var moreMenu: some View {
         ViewerMoreMenu(
             page: currentItem.page, pageCount: currentItem.pageCount, canEdit: currentItem.page == nil,
+            isHidden: currentItem.isHidden,
             onShare: {
                 if let photo = photo(for: currentItem) {
                     PhotoSharing.share([photo])
@@ -580,6 +584,7 @@ struct PhotoViewerOverlay: View {
                 showingNewAlbumAlert = true
             },
             onEdit: { editingItem = currentItem },
+            onToggleHidden: { toggleHidden(currentItem) },
             onDelete: { pendingDeletion = currentItem }
         )
         .equatable()
@@ -603,10 +608,29 @@ struct PhotoViewerOverlay: View {
     /// 删除后停在原位置（即下一张；删的是末尾则前一张）；删光了就原地缩小淡出关闭（格子已不在，不落回）
     private func delete(_ item: ViewerItem) {
         guard let photo = photo(for: item) else { return }
-        let remaining = items.filter { $0.photoID != item.photoID }
-        let position = items.firstIndex { $0.photoID == item.photoID } ?? index
         AlbumOperations.deletePhotos([photo], in: modelContext)
         try? modelContext.save()
+        removeFromViewer(item.photoID)
+    }
+
+    /// 隐藏 / 取消隐藏；不再符合打开时那一页的显示选项的（如默认显示下隐藏了它），像删除一样从查看器里移走
+    private func toggleHidden(_ item: ViewerItem) {
+        guard let photo = photo(for: item) else { return }
+        photo.isHidden.toggle()
+        try? modelContext.save()
+        let hidden = photo.isHidden
+        if session.hiddenFilter.includes(isHidden: hidden) {
+            for position in items.indices where items[position].photoID == item.photoID {
+                items[position].isHidden = hidden
+            }
+        } else {
+            removeFromViewer(item.photoID)
+        }
+    }
+
+    private func removeFromViewer(_ photoID: UUID) {
+        let remaining = items.filter { $0.photoID != photoID }
+        let position = items.firstIndex { $0.photoID == photoID } ?? index
         guard !remaining.isEmpty else {
             beginClose(returnsToGrid: false)
             return
@@ -1046,17 +1070,26 @@ private struct ViewerMoreMenu: View, Equatable {
     let page: Int?
     let pageCount: Int
     let canEdit: Bool
+    let isHidden: Bool
     let onShare: () -> Void
     let onAddTo: (Album) -> Void
     let onNewAlbum: () -> Void
     let onEdit: () -> Void
+    let onToggleHidden: () -> Void
     let onDelete: () -> Void
 
-    @Query(sort: \Album.sortIndex) private var albums: [Album]
+    @Query(sort: \Album.sortIndex) private var allAlbums: [Album]
+    @Environment(PrivacyLock.self) private var privacyLock
+
+    /// 隐藏的相簿只在隐藏内容解锁后列出
+    private var albums: [Album] {
+        allAlbums.filter { !$0.isHidden || privacyLock.isHiddenUnlocked }
+    }
     @AppStorage("viewerReadingOrder") private var readingOrderRaw = ViewerReadingOrder.leftToRight.rawValue
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.page == rhs.page && lhs.pageCount == rhs.pageCount && lhs.canEdit == rhs.canEdit
+            && lhs.isHidden == rhs.isHidden
     }
 
     var body: some View {
@@ -1081,6 +1114,8 @@ private struct ViewerMoreMenu: View, Equatable {
                 if canEdit {
                     Button("编辑", systemImage: "crop", action: onEdit)
                 }
+                Button(isHidden ? "取消隐藏" : "隐藏", systemImage: isHidden ? "eye" : "eye.slash",
+                       action: onToggleHidden)
             }
             Section {
                 Picker(selection: $readingOrderRaw) {

@@ -2,11 +2,33 @@ import PhotosUI
 import SwiftData
 import SwiftUI
 
+/// 图库：显示选项（隐藏照片）放在这一层，变了就按新条件重建下面那页的查询
 struct LibraryView: View {
+    @State private var filter: HiddenFilter = .visible
+
+    var body: some View {
+        LibraryPage(filter: $filter)
+    }
+}
+
+private struct LibraryPage: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ViewerPresenter.self) private var viewerPresenter
     @Environment(SelectionBarPresenter.self) private var selectionBarPresenter
-    @Query(sort: \Photo.createdAt) private var photos: [Photo]
+    @Environment(PrivacyLock.self) private var privacyLock
+    @Binding var filter: HiddenFilter
+    @Query private var photos: [Photo]
+
+    init(filter: Binding<HiddenFilter>) {
+        _filter = filter
+        var predicate: Predicate<Photo>?
+        switch filter.wrappedValue {
+        case .visible: predicate = #Predicate { $0.isHidden == false }
+        case .hiddenOnly: predicate = #Predicate { $0.isHidden == true }
+        case .all: predicate = nil
+        }
+        _photos = Query(filter: predicate, sort: \Photo.createdAt)
+    }
 
     @State private var importer = PhotoImporter()
     @State private var pickerItems: [PhotosPickerItem] = []
@@ -107,7 +129,10 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var content: some View {
-        if photos.isEmpty {
+        if photos.isEmpty, filter == .hiddenOnly {
+            ContentUnavailableView("没有隐藏的照片", systemImage: "eye.slash",
+                                   description: Text("长按照片或在查看器的「…」里选「隐藏」。"))
+        } else if photos.isEmpty {
             ContentUnavailableView {
                 Label("没有照片", systemImage: "photo.on.rectangle.angled")
             } description: {
@@ -134,7 +159,8 @@ struct LibraryView: View {
                 isSelecting: isSelecting,
                 selectedIDs: $selectedIDs,
                 allowsReordering: false,
-                anchorsToBottom: true
+                anchorsToBottom: true,
+                marksHidden: filter == .all
             )
             // 照片滚到导航栏 / Tab 栏下方（材质透出内容）；UIKit 按 adjustedContentInset 让出首末行
             .ignoresSafeArea()
@@ -147,7 +173,8 @@ struct LibraryView: View {
     /// 长按菜单：添加到相簿（现有相簿 + 新建）/ 删除
     private func cellContextMenu(for photoID: UUID) -> [GridMenuItem] {
         guard let photo = photos.first(where: { $0.id == photoID }) else { return [] }
-        let albums = (try? modelContext.fetch(FetchDescriptor<Album>(sortBy: [SortDescriptor(\.sortIndex)]))) ?? []
+        let albums = ((try? modelContext.fetch(FetchDescriptor<Album>(sortBy: [SortDescriptor(\.sortIndex)]))) ?? [])
+            .filter { !$0.isHidden || privacyLock.isHiddenUnlocked }
         let albumItems = albums.map { album in
             GridMenuItem(title: album.name, systemImage: "rectangle.stack") {
                 AlbumOperations.add([photo], to: album, in: modelContext)
@@ -163,6 +190,11 @@ struct LibraryView: View {
             },
             GridMenuItem(title: "添加到相簿", systemImage: "rectangle.stack.badge.plus",
                          children: albumItems + [newAlbum]),
+            GridMenuItem(title: photo.isHidden ? "取消隐藏" : "隐藏",
+                         systemImage: photo.isHidden ? "eye" : "eye.slash") {
+                photo.isHidden.toggle()
+                try? modelContext.save()
+            },
             GridMenuItem(title: "删除", systemImage: "trash", isDestructive: true) {
                 photosPendingDeletion = [photo]
             },
@@ -185,6 +217,7 @@ struct LibraryView: View {
             }
         } else {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                HiddenFilterMenu(filter: $filter)
                 if !photos.isEmpty {
                     Button("选择") {
                         toggleSelectionMode()
@@ -230,7 +263,8 @@ struct LibraryView: View {
         viewerPresenter.present(
             photos: photos, index: index, page: page,
             sourceFrame: { box.lookup?($0) },
-            sourceVisibleRect: { box.visibleRect?() })
+            sourceVisibleRect: { box.visibleRect?() },
+            hiddenFilter: filter)
     }
 
     private func toggleSelectionMode() {
@@ -242,7 +276,10 @@ struct LibraryView: View {
             selectionBarPresenter.beginPhotos(
                 onDelete: { [selectionBarPresenter] in photosPendingDeletion = selectionBarPresenter.session?.photos ?? [] },
                 onNewAlbum: { promptNewAlbum(with: $0) },
-                onAdded: { exitSelectionMode() })
+                onAdded: { exitSelectionMode() },
+                onToggleHidden: { [selectionBarPresenter] in
+                    toggleHidden(selectionBarPresenter.session?.photos ?? [])
+                })
         }
     }
 
@@ -250,6 +287,16 @@ struct LibraryView: View {
         isSelecting = false
         selectedIDs = []
         selectionBarPresenter.end()
+    }
+
+    /// 选中的全部已隐藏 → 都取消隐藏；否则都隐藏
+    private func toggleHidden(_ photos: [Photo]) {
+        let hide = !photos.allSatisfy(\.isHidden)
+        for photo in photos {
+            photo.isHidden = hide
+        }
+        try? modelContext.save()
+        exitSelectionMode()
     }
 
     private func deletePendingPhotos() {
@@ -281,7 +328,13 @@ struct LibraryView: View {
 /// 「添加到相簿」菜单内容：现有相簿列表 + 新建入口
 struct AddToAlbumMenuContent: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \Album.sortIndex) private var albums: [Album]
+    @Query(sort: \Album.sortIndex) private var allAlbums: [Album]
+    @Environment(PrivacyLock.self) private var privacyLock
+
+    /// 隐藏的相簿只在隐藏内容解锁后列出
+    private var albums: [Album] {
+        allAlbums.filter { !$0.isHidden || privacyLock.isHiddenUnlocked }
+    }
 
     let photos: [Photo]
     /// 不列出的相簿（在相簿内选择时排除它自己）

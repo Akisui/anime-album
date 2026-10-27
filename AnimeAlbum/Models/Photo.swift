@@ -21,6 +21,8 @@ final class Photo {
     var duration: Double = 0
     /// 实况照片配套视频的相对路径（与原图同目录）；其余为 nil
     var pairedVideoRelativePath: String?
+    /// 隐藏：默认不在图库 / 相簿里显示，切换显示选项（可能要先验证）后才看得到
+    var isHidden: Bool = false
 
     @Relationship(deleteRule: .cascade, inverse: \AlbumEntry.photo)
     var entries: [AlbumEntry]?

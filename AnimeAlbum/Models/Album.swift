@@ -9,6 +9,8 @@ final class Album {
     var sortIndex: Double = 0
     // 存 ID 而非关系，避免与 AlbumEntry 的反向关系纠缠；为 nil 时封面取排序第一张
     var coverPhotoID: UUID?
+    /// 隐藏相簿：只隐藏相簿本身（相簿列表里不显示），不影响其中照片
+    var isHidden: Bool = false
 
     @Relationship(deleteRule: .cascade, inverse: \AlbumEntry.album)
     var entries: [AlbumEntry]?
@@ -27,16 +29,24 @@ extension Album {
         sortedEntries.compactMap(\.photo)
     }
 
-    /// 封面：指定的那张，否则排第一的那张（只扫一遍找最小，不整体排序 —— 相簿列表每张卡片都要取）
-    var coverPhoto: Photo? {
+    /// 封面：指定的那张，否则排第一的那张（只扫一遍找最小，不整体排序 —— 相簿列表每张卡片都要取）。
+    /// 不含隐藏照片时跳过隐藏的（隐藏照片不能出现在封面上）
+    func coverPhoto(includingHidden: Bool) -> Photo? {
         let entries = entries ?? []
-        if let coverPhotoID, let match = entries.lazy.compactMap(\.photo).first(where: { $0.id == coverPhotoID }) {
+        if let coverPhotoID,
+           let match = entries.lazy.compactMap(\.photo).first(where: { $0.id == coverPhotoID }),
+           includingHidden || !match.isHidden {
             return match
         }
-        return entries.map { ($0.sortIndex, $0) }.min { $0.0 < $1.0 }?.1.photo
+        return entries
+            .compactMap { entry in entry.photo.map { (entry.sortIndex, $0) } }
+            .filter { includingHidden || !$0.1.isHidden }
+            .min { $0.0 < $1.0 }?.1
     }
 
-    var photoCount: Int {
-        entries?.count ?? 0
+    func photoCount(includingHidden: Bool) -> Int {
+        let entries = entries ?? []
+        guard !includingHidden else { return entries.count }
+        return entries.lazy.filter { $0.photo?.isHidden == false }.count
     }
 }
