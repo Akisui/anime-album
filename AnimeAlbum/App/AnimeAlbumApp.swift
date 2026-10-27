@@ -12,9 +12,14 @@ struct AnimeAlbumApp: App {
     init() {
         #if DEBUG
         _ = PushDiagnostics.shared
-        // ONBOARDING=1：当作第一次打开（显示介绍与同意页）；ONBOARDING=old：当作同意过旧版条款（-1）
+        // ONBOARDING=1：当作第一次打开（显示介绍与同意页）；old：当作同意过旧版条款（-1）；done：当作已同意（自动化测试跳过）
         if let raw = ProcessInfo.processInfo.environment["ONBOARDING"] {
-            UserDefaults.standard.set(raw == "old" ? -1 : 0, forKey: "acceptedTermsVersion")
+            let value = switch raw {
+            case "old": -1
+            case "done": AppInfo.termsVersion
+            default: 0
+            }
+            UserDefaults.standard.set(value, forKey: "acceptedTermsVersion")
         }
         // ICLOUD_ON=1：当作同步开关已打开启动（验证 iCloud 不可用时退回纯本地）
         if ProcessInfo.processInfo.environment["ICLOUD_ON"] == "1" {

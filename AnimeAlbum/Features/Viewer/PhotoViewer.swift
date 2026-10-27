@@ -89,6 +89,22 @@ final class ViewerPresenter {
     }
 }
 
+/// 查看器打开期间指定底下页面导航栏的配色，状态栏文字才和查看器一致：iOS 26 的状态栏按导航栏后面的内容
+/// 自动选黑字 / 白字，查看器是盖在上面的浮层、不算在内 —— 图库顶部是深色照片时，查看器里的时间变成白字压在白底上（实测）。
+/// 放在页面的 background 里（零尺寸）：只有它读查看器状态，页面本身不随之重算
+struct ViewerStatusBarHint: View {
+    @Environment(ViewerPresenter.self) private var presenter
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .toolbarColorScheme(
+                presenter.session == nil ? nil : (presenter.chromeHidden ? .dark : colorScheme),
+                for: .navigationBar)
+    }
+}
+
 /// SwiftUI 网格（图库）持续上报可见单元的全局 frame
 final class CellFrameStore {
     var frames: [UUID: CGRect] = [:]

@@ -95,8 +95,11 @@ struct AlbumDetailView: View {
             }
         }
         #endif
-        // 导航栏右侧按钮随这一页滑动（NavBarItemsMotion）
-        .background { NavBarItemsMotion.PageProbe(motion: navItemsMotion).frame(width: 0, height: 0) }
+        // 导航栏右侧按钮随这一页滑动（NavBarItemsMotion）；查看器打开时导航栏配色（ViewerStatusBarHint）
+        .background {
+            NavBarItemsMotion.PageProbe(motion: navItemsMotion).frame(width: 0, height: 0)
+            ViewerStatusBarHint()
+        }
         .navigationTitle(album.name)
         .navigationBarTitleDisplayMode(.inline)
         // 选择中不能返回（底部栏属于这一页），与原生一致：先「取消」再离开

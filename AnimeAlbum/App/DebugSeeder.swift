@@ -21,6 +21,57 @@ enum DebugSeeder {
         }
     }
 
+    /// SEED_SHOWCASE=<目录>：图库为空时按子文件夹导入展示用内容（tools/make_showcase.py 生成），每个子文件夹一个相簿
+    /// （数字前缀定顺序、导入后去掉；H- 开头的相簿标为隐藏；hidden- 开头的文件标为隐藏照片）。走与「从文件导入」相同的管线
+    static func seedShowcase(context: ModelContext) async {
+        guard let path = ProcessInfo.processInfo.environment["SEED_SHOWCASE"],
+              (try? context.fetchCount(FetchDescriptor<Photo>())) ?? 0 == 0
+        else {
+            return
+        }
+        let fileManager = FileManager.default
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        let folders = ((try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let importer = PhotoImporter()
+        var imported: [Photo] = []
+        for folder in folders {
+            let files = ((try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [])
+                .filter { !$0.lastPathComponent.hasPrefix(".") }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            let result = await importer.importFiles(at: files, context: context)
+            let folderName = folder.lastPathComponent
+            let name = folderName.split(separator: "-", maxSplits: 1).last.map(String.init) ?? folderName
+            let album = AlbumOperations.createAlbum(named: name, in: context)
+            AlbumOperations.add(result.photos, to: album, in: context)
+            album.isHidden = folderName.hasPrefix("H-")
+            for photo in result.photos where photo.originalFilename?.hasPrefix("hidden-") == true {
+                photo.isHidden = true
+            }
+            imported += result.photos
+        }
+        // 图库按导入时间排：打散（固定种子），风景 / 插画 / 视频 / PDF 混在一起，不是一个相簿一大块
+        var generator = SeededGenerator(seed: 20261028)
+        let now = Date()
+        for (index, photo) in imported.shuffled(using: &generator).enumerated() {
+            photo.createdAt = now.addingTimeInterval(Double(index - imported.count) * 60)
+        }
+        try? context.save()
+    }
+
+    private struct SeededGenerator: RandomNumberGenerator {
+        var state: UInt64
+        init(seed: UInt64) { state = seed }
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+
     static func seedIfRequested(context: ModelContext) async {
         guard ProcessInfo.processInfo.environment["SEED_DEMO"] == "1" else { return }
 

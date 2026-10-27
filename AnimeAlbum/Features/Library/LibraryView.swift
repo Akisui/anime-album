@@ -58,6 +58,7 @@ private struct LibraryPage: View {
                 .onChange(of: selectedIDs) {
                     selectionBarPresenter.update(photos: selectedPhotos)
                 }
+                .background { ViewerStatusBarHint() }
         }
         .task {
             #if DEBUG

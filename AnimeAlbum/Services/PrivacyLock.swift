@@ -298,12 +298,23 @@ struct AppLockScreen: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "lock.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.secondary)
+        VStack(spacing: 18) {
+            Image("BrandIcon")
+                .resizable()
+                .frame(width: 96, height: 96)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .shadow(color: .black.opacity(0.15), radius: 10, y: 4)
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.accentColor.gradient, in: Circle())
+                        .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 3))
+                        .offset(x: 8, y: 8)
+                }
             Text("\(AppInfo.name)已锁定")
-                .font(.title3.weight(.semibold))
+                .font(.title2.weight(.semibold))
             Button("使用\(privacyLock.biometryName)解锁") {
                 Task { await privacyLock.unlockApp() }
             }

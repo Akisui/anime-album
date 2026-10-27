@@ -189,6 +189,7 @@ struct RootView: View {
         #if DEBUG
         DebugSeeder.applyLaunchTweaks()
         await DebugSeeder.seedIfRequested(context: modelContext)
+        await DebugSeeder.seedShowcase(context: modelContext)
         let env = ProcessInfo.processInfo.environment
         // SIDEBAR_ALBUM=1：直接选中侧栏第一个相簿（iPad）；AUTO_NEW_ALBUM=1：1.5s 后模拟按下 ⌘N
         if env["SIDEBAR_ALBUM"] == "1", let first = albums.first {
