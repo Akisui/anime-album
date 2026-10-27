@@ -138,7 +138,7 @@ final class PrivacyLock {
 
     func unlockApp() async {
         guard !isAppUnlocked, !isAuthenticating else { return }
-        if await authenticate(reason: "解锁角色相册") {
+        if await authenticate(reason: "解锁\(AppInfo.name)") {
             isAppUnlocked = true
         }
     }
@@ -291,7 +291,7 @@ struct AppLockScreen: View {
             Image(systemName: "lock.fill")
                 .font(.system(size: 44))
                 .foregroundStyle(.secondary)
-            Text("角色相册已锁定")
+            Text("\(AppInfo.name)已锁定")
                 .font(.title3.weight(.semibold))
             Button("使用\(privacyLock.biometryName)解锁") {
                 Task { await privacyLock.unlockApp() }

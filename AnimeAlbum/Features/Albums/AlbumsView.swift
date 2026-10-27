@@ -55,7 +55,7 @@ private struct AlbumsPage: View {
                     ContentUnavailableView {
                         Label("没有相簿", systemImage: "rectangle.stack")
                     } description: {
-                        Text("用相簿把喜欢的角色图片分门别类。")
+                        Text("用相簿把照片、视频和 PDF 分门别类。")
                     } actions: {
                         Button("新建相簿") { promptNewAlbum() }
                             .buttonStyle(.borderedProminent)

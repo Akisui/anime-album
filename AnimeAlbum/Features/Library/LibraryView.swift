@@ -136,7 +136,7 @@ private struct LibraryPage: View {
             ContentUnavailableView {
                 Label("没有照片", systemImage: "photo.on.rectangle.angled")
             } description: {
-                Text("从照片图库或文件导入角色图片，开始你的收藏。")
+                Text("从照片图库或文件导入照片、视频和 PDF，开始你的收藏。")
             } actions: {
                 Menu {
                     importMenuItems

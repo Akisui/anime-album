@@ -1,11 +1,12 @@
-"""角色相册 App 图标：渐变底 + 叠放的三张圆角照片卡，最前一张照片里是动漫角色的半身像
-（长发、刘海、呆毛、大眼睛 —— 一眼看出是「角色」的相册），旁边一颗星光点缀。
-用法：python3 tools/make_app_icon.py AnimeAlbum/Assets.xcassets/AppIcon.appiconset  —— 生成 AppIcon.png / AppIcon-Dark.png / AppIcon-Tinted.png（1024px）
+"""拾匣（Keepbox）App 图标：渐变底 + 一只盒子，盒里竖着露出三张卡片 —— PDF 页、视频（播放键）、照片（山与太阳），
+盒子正面一个锁孔（隐藏 / 私密）。
+用法：python3 tools/make_app_icon.py AnimeAlbum/Assets.xcassets/AppIcon.appiconset
+     —— 生成 AppIcon.png / AppIcon-Dark.png / AppIcon-Tinted.png（1024px）
 """
 import math
 import sys
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 S = 4096  # 4 倍超采样，最后缩到 1024
 OUT = 1024
@@ -16,19 +17,15 @@ def lerp(a, b, t):
 
 
 def diagonal_gradient(size, top_left, bottom_right):
-    """左上 → 右下的线性渐变"""
-    w, h = size
     small = Image.new("RGB", (256, 256))
     px = small.load()
     for y in range(256):
         for x in range(256):
-            t = (x + y) / 510
-            px[x, y] = lerp(top_left, bottom_right, t)
+            px[x, y] = lerp(top_left, bottom_right, (x + y) / 510)
     return small.resize(size, Image.BICUBIC)
 
 
 def vertical_gradient(size, top, bottom):
-    w, h = size
     small = Image.new("RGB", (1, 256))
     for y in range(256):
         small.putpixel((0, y), lerp(top, bottom, y / 255))
@@ -41,25 +38,14 @@ def rounded_mask(size, radius):
     return mask
 
 
-def sparkle(draw, cx, cy, r, fill, waist=0.30):
-    """四角星光：四个尖角 + 细腰（waist 为腰宽 / 半径）"""
-    pts = []
-    for i in range(16):
-        angle = math.pi / 2 * (i / 4) - math.pi / 2
-        # 尖角处半径 r，两尖角之间的凹处半径 r*waist，用多点逼近内凹曲线
-        phase = (i % 4) / 4
-        radius = r if phase == 0 else r * waist / (0.35 + 0.65 * math.sin(math.pi * phase))
-        pts.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
-    draw.polygon(pts, fill=fill)
-
-
-def card_layer(card_w, card_h, radius, face, alpha=255):
-    """一张照片卡（含白边相框时由调用方往里画内容）"""
-    layer = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
-    mask = rounded_mask((card_w, card_h), radius)
-    fill = Image.new("RGBA", (card_w, card_h), face + (alpha,))
-    layer.paste(fill, (0, 0), mask)
-    return layer
+def shadow_for(layer, blur, opacity, color=(20, 16, 60)):
+    pad = int(blur * 3)
+    alpha = Image.new("L", (layer.width + pad * 2, layer.height + pad * 2), 0)
+    alpha.paste(layer.split()[3].point(lambda a: int(a * opacity)), (pad, pad))
+    alpha = alpha.filter(ImageFilter.GaussianBlur(blur))
+    shadow = Image.new("RGBA", alpha.size, color + (0,))
+    shadow.putalpha(alpha)
+    return shadow, pad
 
 
 def paste_rotated(canvas, layer, center, angle, shadow=None):
@@ -68,137 +54,140 @@ def paste_rotated(canvas, layer, center, angle, shadow=None):
     y = int(center[1] - rotated.height / 2)
     if shadow:
         offset, blur, opacity = shadow
-        # 四周留出 3 倍模糊半径的余量再模糊，否则阴影被小画布边缘截成生硬的矩形
-        pad = int(blur * 3)
-        alpha = Image.new("L", (rotated.width + pad * 2, rotated.height + pad * 2), 0)
-        alpha.paste(rotated.split()[3].point(lambda a: int(a * opacity)), (pad, pad))
-        alpha = alpha.filter(ImageFilter.GaussianBlur(blur))
-        sh = Image.new("RGBA", alpha.size, (40, 20, 80, 0))
-        sh.putalpha(alpha)
+        sh, pad = shadow_for(rotated, blur, opacity)
         canvas.alpha_composite(sh, (x - pad, y - pad + offset))
     canvas.alpha_composite(rotated, (x, y))
 
 
-def draw_character(photo, dark, tinted=False):
-    """照片里的角色半身像：后发 → 肩膀 → 脖子 → 脸 → 刘海 → 呆毛 → 眼睛 / 腮红"""
-    pw, ph = photo.size
+def card(w, h, radius, fill):
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    layer.paste(Image.new("RGBA", (w, h), fill + (255,)), (0, 0), rounded_mask((w, h), radius))
+    return layer
+
+
+def pdf_card(w, h, radius, palette):
+    layer = card(w, h, radius, palette["paper"])
+    d = ImageDraw.Draw(layer)
+    margin = w * 0.14
+    # 标题条 + 正文行
+    d.rounded_rectangle((margin, h * 0.12, w * 0.62, h * 0.12 + w * 0.07), radius=w * 0.035, fill=palette["accent"])
+    for i in range(6):
+        y = h * 0.27 + i * h * 0.085
+        right = w - margin if i % 3 != 2 else w * 0.6
+        d.rounded_rectangle((margin, y, right, y + w * 0.045), radius=w * 0.022, fill=palette["line"])
+    return layer
+
+
+def video_card(w, h, radius, palette):
+    layer = card(w, h, radius, palette["video"])
+    d = ImageDraw.Draw(layer)
+    cx, cy, r = w / 2, h * 0.42, w * 0.2
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(255, 255, 255, 235))
+    tri = r * 0.55
+    d.polygon([(cx - tri * 0.55, cy - tri), (cx - tri * 0.55, cy + tri), (cx + tri * 0.95, cy)],
+              fill=palette["video"])
+    # 进度条
+    d.rounded_rectangle((w * 0.14, h * 0.8, w * 0.86, h * 0.8 + w * 0.035), radius=w * 0.018,
+                        fill=(255, 255, 255, 90))
+    d.rounded_rectangle((w * 0.14, h * 0.8, w * 0.48, h * 0.8 + w * 0.035), radius=w * 0.018,
+                        fill=(255, 255, 255, 230))
+    return layer
+
+
+def photo_card(w, h, radius, palette):
+    inset = int(w * 0.06)
+    layer = card(w, h, radius, palette["frame"])
+    pw, ph = w - inset * 2, h - inset * 2
+    photo = vertical_gradient((pw, ph), palette["sky_top"], palette["sky_bottom"]).convert("RGBA")
     d = ImageDraw.Draw(photo)
-    X = lambda v: pw * v
-    Y = lambda v: ph * v
-    if tinted:
-        # 染色版：系统按亮度着色，主体要亮 —— 头发用浅色，不然转灰度后是一块黑
-        hair, hair_shade = (214, 206, 246), (188, 178, 232)
-        skin, cloth, collar = (255, 250, 248), (255, 255, 255), (236, 230, 255)
-        eye, blush = (90, 70, 160), (255, 214, 226)
-    elif dark:
-        hair, hair_shade = (150, 128, 236), (118, 98, 206)
-        skin, cloth, collar = (255, 236, 226), (214, 204, 246), (250, 246, 255)
-        eye, blush = (70, 52, 140), (255, 168, 190)
-    else:
-        hair, hair_shade = (126, 98, 226), (98, 74, 196)
-        skin, cloth, collar = (255, 240, 232), (255, 255, 255), (232, 222, 255)
-        eye, blush = (64, 44, 140), (255, 160, 186)
-
-    # 后发：披到肩下的长发
-    d.rounded_rectangle((X(0.22), Y(0.24), X(0.78), Y(0.98)), radius=X(0.22), fill=hair_shade)
-    # 肩膀 / 上身（被照片下沿截掉）
-    d.rounded_rectangle((X(0.12), Y(0.78), X(0.88), Y(1.40)), radius=X(0.22), fill=cloth)
-    # 领口：小三角
-    d.polygon([(X(0.40), Y(0.78)), (X(0.60), Y(0.78)), (X(0.50), Y(0.90))], fill=collar)
-    # 脖子
-    d.rectangle((X(0.445), Y(0.64), X(0.555), Y(0.80)), fill=skin)
-    # 脸
-    d.ellipse((X(0.30), Y(0.30), X(0.70), Y(0.72)), fill=skin)
-    # 刘海：头顶发帽 + 锯齿发梢
-    d.ellipse((X(0.27), Y(0.20), X(0.73), Y(0.58)), fill=hair)
-    fringe = [(X(0.27), Y(0.40))]
-    tips = [0.27, 0.35, 0.43, 0.51, 0.59, 0.67, 0.73]
-    for i in range(len(tips) - 1):
-        a, b = tips[i], tips[i + 1]
-        fringe.append((X((a + b) / 2), Y(0.50 if i % 2 == 0 else 0.47)))
-        fringe.append((X(b), Y(0.40)))
-    fringe += [(X(0.73), Y(0.36)), (X(0.27), Y(0.36))]
-    d.polygon(fringe, fill=hair)
-    # 两侧垂下的鬓发
-    d.rounded_rectangle((X(0.25), Y(0.36), X(0.34), Y(0.78)), radius=X(0.045), fill=hair)
-    d.rounded_rectangle((X(0.66), Y(0.36), X(0.75), Y(0.78)), radius=X(0.045), fill=hair)
-    # 呆毛：头顶一撮弯弯的头发（月牙形）
-    ahoge = []
-    for i in range(13):
-        t = i / 12
-        ahoge.append((X(0.50 + 0.10 * t), Y(0.215 - 0.12 * math.sin(math.pi * t * 0.9))))
-    for i in range(13):
-        t = 1 - i / 12
-        ahoge.append((X(0.52 + 0.08 * t), Y(0.215 - 0.085 * math.sin(math.pi * t * 0.9))))
-    d.polygon(ahoge, fill=hair)
-    # 大眼睛 + 高光
-    for ex in (0.415, 0.585):
-        d.ellipse((X(ex - 0.035), Y(0.525), X(ex + 0.035), Y(0.615)), fill=eye)
-        d.ellipse((X(ex - 0.012), Y(0.535), X(ex + 0.010), Y(0.565)), fill=(255, 255, 255))
-    # 腮红
-    for bx in (0.375, 0.625):
-        d.ellipse((X(bx - 0.035), Y(0.635), X(bx + 0.035), Y(0.665)), fill=blush)
+    # 太阳
+    sr = pw * 0.13
+    d.ellipse((pw * 0.66 - sr, ph * 0.26 - sr, pw * 0.66 + sr, ph * 0.26 + sr), fill=palette["sun"])
+    # 远山、近山
+    d.polygon([(0, ph * 0.78), (pw * 0.3, ph * 0.48), (pw * 0.55, ph * 0.7), (pw * 0.75, ph * 0.56),
+               (pw, ph * 0.74), (pw, ph), (0, ph)], fill=palette["hill_far"])
+    d.polygon([(0, ph * 0.9), (pw * 0.4, ph * 0.66), (pw * 0.8, ph * 0.92), (pw, ph * 0.84), (pw, ph), (0, ph)],
+              fill=palette["hill_near"])
+    layer.paste(photo, (inset, inset), rounded_mask((pw, ph), int(radius * 0.7)))
+    return layer
 
 
-def make_icon(dark=False, tinted=False):
-    if dark:
-        bg = diagonal_gradient((S, S), (58, 40, 84), (24, 22, 46))
-        back_face, back_alpha = (255, 255, 255), 46
-        frame_face = (236, 232, 248)
-        sky_top, sky_bottom = (96, 120, 220), (176, 132, 236)
-    else:
-        bg = diagonal_gradient((S, S), (255, 154, 190), (142, 124, 255))
-        back_face, back_alpha = (255, 255, 255), 90
-        frame_face = (255, 255, 255)
-        sky_top, sky_bottom = (120, 196, 255), (198, 168, 255)
+def box_front(w, h, palette):
+    """盒子正面：上沿一道高光，中间锁孔"""
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    radius = int(w * 0.12)
+    body = vertical_gradient((w, h), palette["box_top"], palette["box_bottom"]).convert("RGBA")
+    layer.paste(body, (0, 0), rounded_mask((w, h), radius))
+    d = ImageDraw.Draw(layer)
+    # 盒沿
+    d.rounded_rectangle((0, 0, w - 1, h * 0.16), radius=radius, fill=palette["rim"])
+    # 锁孔：圆 + 下窄上宽的槽
+    cx, cy, r = w / 2, h * 0.53, w * 0.07
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=palette["keyhole"])
+    d.polygon([(cx - r * 0.45, cy), (cx + r * 0.45, cy), (cx + r * 0.75, cy + r * 2.3), (cx - r * 0.75, cy + r * 2.3)],
+              fill=palette["keyhole"])
+    return layer
 
-    canvas = bg.convert("RGBA")
-    cx, cy = S / 2, S * 0.53
-    card_w, card_h = int(S * 0.50), int(S * 0.58)
-    radius = int(S * 0.055)
 
-    # 后面两张：左倾 / 右倾、半透明，像相册里叠着的照片
-    back = card_layer(card_w, card_h, radius, back_face, back_alpha)
-    paste_rotated(canvas, back, (cx - S * 0.075, cy - S * 0.02), 13, shadow=(int(S * 0.012), S * 0.02, 0.10))
-    paste_rotated(canvas, back, (cx + S * 0.075, cy - S * 0.03), -10, shadow=(int(S * 0.012), S * 0.02, 0.10))
+PALETTES = {
+    "light": {
+        "bg": ((86, 190, 255), (102, 84, 236)),
+        "paper": (255, 255, 255), "accent": (255, 120, 120), "line": (214, 220, 236),
+        "video": (40, 44, 72),
+        "frame": (255, 255, 255), "sky_top": (120, 200, 255), "sky_bottom": (255, 214, 170),
+        "sun": (255, 246, 210), "hill_far": (120, 176, 140), "hill_near": (70, 140, 110),
+        "box_top": (255, 255, 255), "box_bottom": (232, 236, 252), "rim": (246, 248, 255),
+        "keyhole": (102, 96, 200),
+    },
+    "dark": {
+        "bg": ((28, 52, 96), (30, 22, 70)),
+        "paper": (232, 236, 246), "accent": (236, 104, 112), "line": (190, 198, 218),
+        "video": (24, 26, 44),
+        "frame": (236, 238, 248), "sky_top": (84, 150, 230), "sky_bottom": (230, 170, 140),
+        "sun": (255, 236, 196), "hill_far": (96, 150, 122), "hill_near": (56, 116, 92),
+        "box_top": (70, 78, 120), "box_bottom": (48, 52, 92), "rim": (90, 98, 146),
+        "keyhole": (182, 176, 255),
+    },
+}
 
-    # 最前一张：白边相框 + 天空 + 星光
-    front = card_layer(card_w, card_h, radius, frame_face)
-    inset = int(S * 0.028)
-    photo_w, photo_h = card_w - inset * 2, int(card_h * 0.78)
-    photo = vertical_gradient((photo_w, photo_h), sky_top, sky_bottom).convert("RGBA")
-    draw_character(photo, dark, tinted)
-    d = ImageDraw.Draw(photo)
-    # 星光点缀：左上一大、右上一小
-    star = (255, 255, 255) if not dark else (255, 246, 214)
-    sparkle(d, photo_w * 0.15, photo_h * 0.17, photo_w * 0.085, star)
-    sparkle(d, photo_w * 0.86, photo_h * 0.30, photo_w * 0.05, star)
-    photo_mask = rounded_mask((photo_w, photo_h), int(radius * 0.6))
-    front.paste(photo, (inset, inset), photo_mask)
-    # 相框下沿留白处的一行「标题」短线（拍立得的书写区）
-    fd = ImageDraw.Draw(front)
-    line_y = inset + photo_h + int((card_h - inset - photo_h) * 0.42)
-    line_color = (226, 214, 255) if not dark else (180, 170, 214)
-    fd.rounded_rectangle(
-        (inset + photo_w * 0.08, line_y, inset + photo_w * 0.46, line_y + S * 0.018),
-        radius=int(S * 0.009), fill=line_color)
-    paste_rotated(canvas, front, (cx, cy + S * 0.01), -3, shadow=(int(S * 0.02), S * 0.03, 0.22))
 
+def make_icon(variant):
+    p = dict(PALETTES["dark" if variant == "dark" else "light"])
+    if variant == "tinted":
+        # 染色版黑底：视频卡调成中灰，不然转灰度后和黑底融在一起
+        p["video"] = (110, 112, 128)
+    canvas = diagonal_gradient((S, S), *p["bg"]).convert("RGBA")
+    if variant == "tinted":
+        canvas = Image.new("RGBA", (S, S), (0, 0, 0, 255))
+
+    card_w, card_h = int(S * 0.30), int(S * 0.40)
+    radius = int(S * 0.04)
+    base_y = S * 0.44
+    paste_rotated(canvas, pdf_card(card_w, card_h, radius, p), (S * 0.33, base_y + S * 0.02), 14,
+                  shadow=(int(S * 0.01), S * 0.02, 0.25))
+    paste_rotated(canvas, video_card(card_w, card_h, radius, p), (S * 0.5, base_y - S * 0.03), 0,
+                  shadow=(int(S * 0.012), S * 0.022, 0.28))
+    paste_rotated(canvas, photo_card(card_w, card_h, radius, p), (S * 0.67, base_y + S * 0.02), -14,
+                  shadow=(int(S * 0.012), S * 0.022, 0.28))
+
+    box_w, box_h = int(S * 0.66), int(S * 0.3)
+    front = box_front(box_w, box_h, p)
+    sh, pad = shadow_for(front, S * 0.03, 0.35)
+    bx, by = int((S - box_w) / 2), int(S * 0.56)
+    canvas.alpha_composite(sh, (bx - pad, by - pad + int(S * 0.02)))
+    canvas.alpha_composite(front, (bx, by))
     return canvas.convert("RGB").resize((OUT, OUT), Image.LANCZOS)
 
 
-def make_tinted(light_icon):
-    """染色变体：灰度图，系统按用户选的色调着色"""
-    gray = light_icon.convert("L")
-    # 拉开对比：背景压暗、卡片与星光保持亮
-    gray = gray.point(lambda v: int(max(0, min(255, (v - 110) * 1.6))))
+def make_tinted():
+    """染色变体：灰度图（系统按用户选的色调着色）—— 主体亮、底色暗"""
+    gray = make_icon("tinted").convert("L")
     return Image.merge("RGB", (gray, gray, gray))
 
 
 if __name__ == "__main__":
     out = sys.argv[1]
-    light = make_icon(dark=False)
-    light.save(f"{out}/AppIcon.png")
-    make_icon(dark=True).save(f"{out}/AppIcon-Dark.png")
-    make_tinted(make_icon(tinted=True)).save(f"{out}/AppIcon-Tinted.png")
+    make_icon("light").save(f"{out}/AppIcon.png")
+    make_icon("dark").save(f"{out}/AppIcon-Dark.png")
+    make_tinted().save(f"{out}/AppIcon-Tinted.png")
     print("done")

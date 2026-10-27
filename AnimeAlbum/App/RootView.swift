@@ -17,6 +17,8 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
     @Environment(PrivacyLock.self) private var privacyLock
+    /// 同意过的条款版本（0 = 第一次打开）
+    @AppStorage("acceptedTermsVersion") private var acceptedTermsVersion = 0
     @State private var viewerPresenter = ViewerPresenter()
     @State private var selectionBarPresenter = SelectionBarPresenter()
     /// 启动后在屏幕外预先搭一遍相簿页（见 albumPagePrewarm）
@@ -46,6 +48,17 @@ struct RootView: View {
             .environment(viewerPresenter)
             .environment(selectionBarPresenter)
             .task { await launchTasks() }
+            // 第一次打开 / 条款更新：介绍与同意页盖在最上面，同意后淡出
+            .overlay {
+                if acceptedTermsVersion < AppInfo.termsVersion {
+                    OnboardingView(reconfirming: acceptedTermsVersion != 0) {
+                        withAnimation(.easeInOut(duration: 0.35)) {
+                            acceptedTermsVersion = AppInfo.termsVersion
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            }
             // 打开时验证：锁着时盖住全部内容；离开前台（多任务切换器的截图）时也盖住
             .overlay {
                 if privacyLock.requiresAuthToOpen,
