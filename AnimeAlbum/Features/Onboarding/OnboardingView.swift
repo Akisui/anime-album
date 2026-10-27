@@ -116,7 +116,7 @@ struct OnboardingView: View {
                                    detail: "没有账号、没有广告，也没有第三方统计。")
                         FeatureRow(systemImage: "photo.badge.checkmark", color: .blue,
                                    title: "只读你选中的照片",
-                                   detail: "通过系统选择器导入，不会访问你的整个照片图库。")
+                                   detail: "通过系统选择器导入；导入后可以从系统相册删掉原图，只留在这里。")
                         FeatureRow(systemImage: "lock.iphone", color: .indigo,
                                    title: "内容只属于你",
                                    detail: "只保存在你的设备和你自己的 iCloud 中，开发者无法访问。")

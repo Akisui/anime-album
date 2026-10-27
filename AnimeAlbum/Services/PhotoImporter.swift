@@ -16,6 +16,9 @@ final class PhotoImporter {
     private(set) var documentProgress: (page: Int, pageCount: Int)?
     @ObservationIgnored private var processingID: UUID?
     var summary: String?
+    /// 从照片图库导入后，可以从系统相册删除原图的那些项（系统照片库的本地标识；只含确认已在拾匣里的 —— 新导入成功或本来就有）。
+    /// 非空时页面弹「从系统相册删除这 N 项？」（见 OriginalDeletionPrompt）
+    var originalsToOffer: [String] = []
 
     /// 一次导入的结果：photos 为这批选择对应的照片（新导入的 + 图库中已有的重复项，按选择顺序、去重），
     /// 供「相簿里直接导入」把它们加入相簿
@@ -24,6 +27,8 @@ final class PhotoImporter {
         var imported = 0
         var duplicates = 0
         var failed = 0
+        /// 确认已在拾匣里的那些项的序号（新导入成功的 + 本来就有的重复项）；失败的不在里面
+        var safeIndices: [Int] = []
     }
 
     /// 一项待导入的内容：图片 / PDF 的数据、视频文件（临时文件，导入后删除）、实况照片（静态图数据 + 配套视频）
@@ -35,7 +40,7 @@ final class PhotoImporter {
 
     @discardableResult
     func importPickerItems(_ items: [PhotosPickerItem], context: ModelContext) async -> ImportResult {
-        await runImport(count: items.count, context: context) { index in
+        let result = await runImport(count: items.count, context: context) { index in
             let item = items[index]
             let types = item.supportedContentTypes
             // 实况照片：静态图 + 配套视频都存下来（只取 Data 的话只拿到静态图）
@@ -52,6 +57,11 @@ final class PhotoImporter {
             guard let data = try await item.loadTransferable(type: Data.self) else { return nil }
             return .data(data, filename: nil)
         }
+        // 只提供删除确认已在拾匣里的那些（导入失败的绝不删）
+        if OriginalDeletion.isOffered {
+            originalsToOffer = result.safeIndices.compactMap { items[$0].itemIdentifier }
+        }
+        return result
     }
 
     @discardableResult
@@ -191,6 +201,7 @@ final class PhotoImporter {
                 }
                 if let existing = photosByHash[hash] {
                     result.duplicates += 1
+                    result.safeIndices.append(index)
                     appendResult(existing)
                     continue
                 }
@@ -232,6 +243,7 @@ final class PhotoImporter {
                 photosByHash[hash] = photo
                 appendResult(photo)
                 result.imported += 1
+                result.safeIndices.append(index)
             } catch {
                 result.failed += 1
             }

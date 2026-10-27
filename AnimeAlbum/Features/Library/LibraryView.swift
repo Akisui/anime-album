@@ -93,7 +93,9 @@ private struct LibraryPage: View {
             }
             #endif
         }
-        .photosPicker(isPresented: $showingPhotosPicker, selection: $pickerItems, matching: .any(of: [.images, .videos, .livePhotos]))
+        .photosPicker(isPresented: $showingPhotosPicker, selection: $pickerItems,
+                      matching: .any(of: [.images, .videos, .livePhotos]), photoLibrary: .shared())
+        .offersOriginalDeletion(importer: importer)
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: PhotoImporter.importableTypes,

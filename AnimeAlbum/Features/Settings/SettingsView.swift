@@ -129,6 +129,7 @@ private struct CloudSyncSettingsView: View {
 
 private struct PrivacySettingsView: View {
     @Environment(PrivacyLock.self) private var privacyLock
+    @AppStorage(OriginalDeletion.offerKey) private var offersOriginalDeletion = true
 
     var body: some View {
         let biometry = privacyLock.biometryName
@@ -165,6 +166,14 @@ private struct PrivacySettingsView: View {
                 Text("隐藏")
             } footer: {
                 Text("显示选项「全局统一」时在任何地方切换，图库、相簿列表和所有相簿一起生效；「各页面分别设置」时各自记。隐藏相簿默认作用于其中全部照片：看得到这个相簿就看得到里面所有照片。离开 App 后，隐藏内容会自动收起。")
+            }
+
+            Section {
+                Toggle("从照片图库导入后询问是否删除原图", isOn: $offersOriginalDeletion)
+            } header: {
+                Text("导入")
+            } footer: {
+                Text("放进\(AppInfo.name)的照片可以从系统相册删掉，只留在这里。删除时才会请求照片权限；删掉的先进系统「照片」的「最近删除」，30 天后彻底删除。")
             }
         }
         .navigationTitle("隐私与安全")
