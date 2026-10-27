@@ -159,6 +159,10 @@ struct RootView: View {
         Task {
             try? await Task.sleep(for: .seconds(1))
             guard prewarmAlbum == nil, let first = albums.first else { return }
+            #if DEBUG
+            // NO_PREWARM=1：不预搭（模拟点的不是预搭过的那个相簿、缩略图缓存是空的）
+            if ProcessInfo.processInfo.environment["NO_PREWARM"] == "1" { return }
+            #endif
             prewarmAlbum = first
             #if DEBUG
             PushDiagnostics.shared.note("预搭相簿页开始")

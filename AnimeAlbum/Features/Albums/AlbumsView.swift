@@ -35,6 +35,8 @@ private struct AlbumsPage: View {
     @State private var albumsPendingDeletion: [Album] = []
     @State private var navigationPath = NavigationPath()
     @State private var appearanceGate = AppearanceGate()
+    /// 正在预载缩略图、准备推入（防连点推两次）
+    @State private var openingAlbumID: UUID?
     @State private var navItemsMotion = NavBarItemsMotion()
 
     @State private var isSelecting = false
@@ -211,6 +213,30 @@ private struct AlbumsPage: View {
             PushDiagnostics.shared.note("  相簿列表还没出现完成，推入排到出现完成时")
         }
         #endif
+        guard openingAlbumID == nil else { return }
+        openingAlbumID = album.id
+        // 先把头几屏的缩略图载进缓存（最多等 0.15s）：缓存是空的时候（没预搭过的相簿），格子滑进来时还是空的、
+        // 照片随后一张张冒出来（真机解码慢）
+        let photoIDs = leadingPhotoIDs(of: album, limit: 30)
+        Task {
+            await ThumbnailCache.shared.preload(photoIDs, kind: .small, timeout: .milliseconds(150))
+            openingAlbumID = nil
+            push(album)
+        }
+    }
+
+    /// 相簿里排在最前的几张（数据库排序 + 限量，不把整个相簿取出来）
+    private func leadingPhotoIDs(of album: Album, limit: Int) -> [UUID] {
+        let albumID = album.id
+        var descriptor = FetchDescriptor<AlbumEntry>(
+            predicate: #Predicate { $0.album?.id == albumID },
+            sortBy: [SortDescriptor(\.sortIndex)])
+        descriptor.fetchLimit = limit
+        descriptor.relationshipKeyPathsForPrefetching = [\.photo]
+        return ((try? modelContext.fetch(descriptor)) ?? []).compactMap { $0.photo?.id }
+    }
+
+    private func push(_ album: Album) {
         // 第一次切到相簿 Tab 后约 0.7s 内，相簿列表还没「出现完成」，这时推入系统不加动画、相簿页直接出现（真机诊断 + 模拟器复现）。
         // 这段时间里点的先排着，出现完成时再推入
         appearanceGate.run {

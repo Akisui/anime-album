@@ -28,6 +28,7 @@ struct AlbumDetailView: View {
     @Environment(SelectionBarPresenter.self) private var selectionBarPresenter
     /// RootView 启动后在屏幕外预搭的那一份：不跑任何任务（调试的自动导入等会执行两遍）
     @Environment(\.isPrewarmCopy) private var isPrewarmCopy
+    @Environment(PrivacyLock.self) private var privacyLock
     @State private var showingPicker = false
     // 相簿里直接导入（系统相册 / 文件）：先进图库（按内容哈希去重），再加入本相簿
     @State private var importer = PhotoImporter()
@@ -69,13 +70,10 @@ struct AlbumDetailView: View {
         _entries = Query(descriptor)
     }
 
-    /// 推入时先不取数据：SwiftUI 推入前会同步算一遍目标页，大相簿的查询（1500 张约 120ms）全压在推入动画开始前，
-    /// 刚启动时第一次进相簿推入动画被吃掉（用户反馈）。页面出现后的下一轮再取 —— 推入动画由渲染进程驱动，
-    /// 主线程忙也照样走，照片在滑入途中出现
-    @State private var showsContent = false
-
+    /// 推入前就把宫格搭好、第一帧就在：曾经推入时先不取数据（以为主线程忙会吃掉推入动画 —— 已证伪，见 CLAUDE.md），
+    /// 结果滑入的头几帧是空白页、宫格随后才闪出来（用户反馈，录屏实测）
     private var photos: [Photo] {
-        showsContent ? entries.compactMap(\.photo) : []
+        entries.compactMap(\.photo)
     }
 
     private var selectedPhotos: [Photo] {
@@ -104,13 +102,11 @@ struct AlbumDetailView: View {
         // 选择中不能返回（底部栏属于这一页），与原生一致：先「取消」再离开
         .navigationBarBackButtonHidden(isSelecting)
         .toolbar { toolbarContent }
+        #if DEBUG
         .onAppear {
-            guard !showsContent else { return }
-            #if DEBUG
             Self.debugStall(at: "appear")
-            #endif
-            DispatchQueue.main.async { showsContent = true }
         }
+        #endif
         .onChange(of: selectedIDs) {
             selectionBarPresenter.update(photos: selectedPhotos)
         }
@@ -192,9 +188,7 @@ struct AlbumDetailView: View {
 
     @ViewBuilder
     private var content: some View {
-        if !showsContent {
-            Color(.systemBackground)
-        } else if photos.isEmpty, filter == .hiddenOnly {
+        if photos.isEmpty, filter == .hiddenOnly {
             ContentUnavailableView("没有隐藏的照片", systemImage: "eye.slash",
                                    description: Text("这个相簿里没有隐藏的照片。"))
         } else if photos.isEmpty {
@@ -261,6 +255,8 @@ struct AlbumDetailView: View {
                     PhotoSharing.share([photo])
                 }
             },
+            GridMenuItem(title: "添加到相簿", systemImage: "rectangle.stack.badge.plus",
+                         children: addToAlbumItems(for: photoID)),
             GridMenuItem(title: "设为封面", systemImage: "photo.badge.checkmark") {
                 album.coverPhotoID = photoID
                 try? modelContext.save()
@@ -279,6 +275,23 @@ struct AlbumDetailView: View {
                 }
             },
         ]
+    }
+
+    /// 「添加到相簿」子菜单：其他相簿（隐藏的相簿只在有页面显示隐藏内容时列出）+ 新建
+    private func addToAlbumItems(for photoID: UUID) -> [GridMenuItem] {
+        guard let photo = photos.first(where: { $0.id == photoID }) else { return [] }
+        let others = ((try? modelContext.fetch(FetchDescriptor<Album>(sortBy: [SortDescriptor(\.sortIndex)]))) ?? [])
+            .filter { $0.id != album.id && (!$0.isHidden || privacyLock.showsHiddenAnywhere) }
+        let albumItems = others.map { target in
+            GridMenuItem(title: target.name, systemImage: "rectangle.stack") {
+                AlbumOperations.add([photo], to: target, in: modelContext)
+                try? modelContext.save()
+            }
+        }
+        let newAlbum = GridMenuItem(title: "新建相簿…", systemImage: "plus") {
+            promptNewAlbum(with: [photo])
+        }
+        return albumItems + [newAlbum]
     }
 
     /// 切换隐藏后这张是否不再符合当前显示选项（从这一页消失）
@@ -310,7 +323,7 @@ struct AlbumDetailView: View {
             // 与按钮种类无关）。间距 19 = 系统两个独立项的间距。整项随页面滑动（NavBarItemsMotion）
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 19) {
-                    // 按查询结果判断、不看 photos：推入期间 photos 还是空的（showsContent）
+                    // 按查询结果判断
                     if !entries.isEmpty {
                         Button("选择") { enterSelectionMode() }
                     }

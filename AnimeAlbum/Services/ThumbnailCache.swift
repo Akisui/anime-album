@@ -16,6 +16,12 @@ final class ThumbnailCache: @unchecked Sendable {
         if let cached = cache.object(forKey: key) {
             return cached
         }
+        #if DEBUG
+        // THUMB_DELAY=毫秒：模拟真机上第一次解码缩略图的耗时（模拟器读得太快，看不出格子先空后出图）
+        if let raw = ProcessInfo.processInfo.environment["THUMB_DELAY"], let ms = Double(raw) {
+            try? await Task.sleep(for: .milliseconds(ms))
+        }
+        #endif
         let loaded: UIImage?
         if kind == .tiny {
             loaded = await store.loadTinyThumbnail(photoID: photoID)
@@ -30,6 +36,25 @@ final class ThumbnailCache: @unchecked Sendable {
     }
 
     /// 仅查内存缓存（同步），过渡动画取当前已解码图用
+    /// 预载一批缩略图，最多等 timeout（到点就返回，没载完的继续在后台载进缓存）
+    func preload(_ photoIDs: [UUID], kind: ThumbnailKind, timeout: Duration) async {
+        let missing = photoIDs.filter { cachedImage(for: $0, kind: kind) == nil }
+        guard !missing.isEmpty else { return }
+        let loading = Task.detached(priority: .userInitiated) {
+            await withTaskGroup(of: Void.self) { group in
+                for photoID in missing {
+                    group.addTask { _ = await self.image(for: photoID, kind: kind) }
+                }
+            }
+        }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await loading.value }
+            group.addTask { try? await Task.sleep(for: timeout) }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
     func cachedImage(for photoID: UUID, kind: ThumbnailKind) -> UIImage? {
         cache.object(forKey: cacheKey(photoID: photoID, kind: kind))
     }
