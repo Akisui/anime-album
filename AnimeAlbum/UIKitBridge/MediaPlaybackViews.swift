@@ -40,7 +40,10 @@ final class VideoPlaybackView: UIView {
         super.init(frame: .zero)
         backgroundColor = .clear
         isUserInteractionEnabled = false
-        playerLayer.videoGravity = .resizeAspect
+        // 铺满并四边各多出 1pt（外层 imageView 裁掉多出的部分）：视频盖在封面图上，封面来自缩略图、比例与视频差零点几像素，
+        // 视频层渲染时又对齐到整像素 —— 按 aspect-fit 或刚好等大时，封面会在边上露出一行像素，
+        // 颜色与播放中的画面不同，黑底上是一条彩边（用户反馈，竖拍视频底边实测）
+        playerLayer.videoGravity = .resizeAspectFill
         layer.addSublayer(playerLayer)
         spinner.color = .white
         spinner.hidesWhenStopped = true
@@ -59,7 +62,7 @@ final class VideoPlaybackView: UIView {
         super.layoutSubviews()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        playerLayer.frame = bounds
+        playerLayer.frame = bounds.insetBy(dx: -1, dy: -1)
         CATransaction.commit()
         spinner.center = CGPoint(x: bounds.midX, y: bounds.midY)
     }
