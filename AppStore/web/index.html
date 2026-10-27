@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>技术支持 · 拾匣</title>
+<style>
+:root { --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --accent: #5b5bd6; --card: #f5f5f7; }
+@media (prefers-color-scheme: dark) { :root { --bg: #000; --fg: #f5f5f7; --muted: #a1a1a6; --accent: #8e8cff; --card: #1c1c1e; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 17px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+main { max-width: 720px; margin: 0 auto; padding: 48px 20px 64px; }
+header { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+header img { width: 56px; height: 56px; border-radius: 13px; }
+header .name { font-size: 15px; color: var(--muted); }
+h1 { font-size: 30px; margin: 0; }
+h2 { font-size: 19px; margin: 30px 0 6px; }
+p { margin: 0; color: var(--muted); }
+nav { margin-top: 40px; display: flex; gap: 18px; flex-wrap: wrap; font-size: 15px; }
+a { color: var(--accent); text-decoration: none; }
+.card { background: var(--card); border-radius: 14px; padding: 18px 20px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+<header><img src="icon.png" alt=""><div><div class="name">拾匣 Keepbox</div><h1>技术支持</h1></div></header>
+<p>拾匣是一款私密相册：把不想放进系统相册的照片、视频和 PDF 收在这里，可以隐藏、可以用面容 ID 上锁，所有内容只保存在你的设备和你自己的 iCloud 中。</p>
+<div class="card"><h2 style="margin-top:0">常见问题</h2>
+<h2>换手机后照片还在吗？</h2><p>在「设置 › iCloud 同步」中打开同步后，内容会保存在你本人的 iCloud 里，新设备登录同一 Apple 账户并打开同步即可。未开启同步时，内容只在本机，请在换机前用 iCloud 同步或系统备份迁移。</p>
+<h2>隐藏的照片在哪里看？</h2><p>在图库、相簿列表或相簿里点右上角「…」，在「显示」中选择「只显示隐藏的」或「全部显示」。如开启了「查看隐藏内容时验证」，需要先通过面容 ID / 触控 ID。</p>
+<h2>导入后系统相册里还有原图？</h2><p>从照片图库导入完成后会询问是否从系统相册删除原图；删除的照片会先进入系统「照片」的「最近删除」，30 天后彻底删除，也可以在那里手动立即删除。</p>
+<h2>面容 ID 识别不了怎么办？</h2><p>面容 ID / 触控 ID 不可用或连续失败时，可以改用设备密码解锁。</p>
+</div>
+<div class="card"><h2 style="margin-top:0">联系我们</h2><p>如有问题或建议，请通过 App Store 中本 App 页面的「App 支持」联系开发者。</p></div>
+<nav><a href="index.html">技术支持</a><a href="privacy.html">隐私政策</a><a href="terms.html">用户协议</a><a href="disclaimer.html">免责声明</a></nav>
+</main>
+</body>
+</html>
