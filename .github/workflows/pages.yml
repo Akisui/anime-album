@@ -1,0 +1,33 @@
+# 把 AppStore/web/（隐私政策、用户协议、免责声明、技术支持页）发布到 GitHub Pages。
+# 网页由 tools/make_legal_pages.py 从 App 里的文本生成，改完重新生成并推到 main 即自动更新。
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["AppStore/web/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: AppStore/web
+      - id: deployment
+        uses: actions/deploy-pages@v4
