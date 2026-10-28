@@ -1,8 +1,8 @@
 import Photos
 import SwiftUI
 
-/// 从照片图库导入后，询问是否从系统相册删除原图（用户要求：放进拾匣的私密照片不想再留在系统相册里）。
-/// 只删确认已在拾匣里的那些（PhotoImporter.originalsToOffer）；删除前要照片库的读写权限（只在这时申请），
+/// 从照片图库导入后，询问是否从系统相册删除原图（用户要求：放进推し箱的私密照片不想再留在系统相册里）。
+/// 只删确认已在推し箱里的那些（PhotoImporter.originalsToOffer）；删除前要照片库的读写权限（只在这时申请），
 /// 系统还会弹自己的删除确认；删掉的先进系统「照片」的「最近删除」，30 天后彻底删除
 enum OriginalDeletion {
     static let offerKey = "offerDeleteOriginals"

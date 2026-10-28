@@ -1,4 +1,4 @@
-"""拾匣（Keepbox）App 图标：渐变底 + 一只盒子，盒里竖着露出三张卡片 —— PDF 页、视频（播放键）、照片（山与太阳），
+"""推し箱（Oshibako）App 图标：渐变底 + 一只盒子，盒里竖着露出三张卡片 —— PDF 页、视频（播放键）、照片（山与太阳），
 盒子正面一个锁孔（隐藏 / 私密）。
 用法：python3 tools/make_app_icon.py AnimeAlbum/Assets.xcassets/AppIcon.appiconset
      —— 生成 AppIcon.png / AppIcon-Dark.png / AppIcon-Tinted.png（1024px）

@@ -16,7 +16,7 @@ final class PhotoImporter {
     private(set) var documentProgress: (page: Int, pageCount: Int)?
     @ObservationIgnored private var processingID: UUID?
     var summary: String?
-    /// 从照片图库导入后，可以从系统相册删除原图的那些项（系统照片库的本地标识；只含确认已在拾匣里的 —— 新导入成功或本来就有）。
+    /// 从照片图库导入后，可以从系统相册删除原图的那些项（系统照片库的本地标识；只含确认已在推し箱里的 —— 新导入成功或本来就有）。
     /// 非空时页面弹「从系统相册删除这 N 项？」（见 OriginalDeletionPrompt）
     var originalsToOffer: [String] = []
 
@@ -27,7 +27,7 @@ final class PhotoImporter {
         var imported = 0
         var duplicates = 0
         var failed = 0
-        /// 确认已在拾匣里的那些项的序号（新导入成功的 + 本来就有的重复项）；失败的不在里面
+        /// 确认已在推し箱里的那些项的序号（新导入成功的 + 本来就有的重复项）；失败的不在里面
         var safeIndices: [Int] = []
     }
 
@@ -57,7 +57,7 @@ final class PhotoImporter {
             guard let data = try await item.loadTransferable(type: Data.self) else { return nil }
             return .data(data, filename: nil)
         }
-        // 只提供删除确认已在拾匣里的那些（导入失败的绝不删）
+        // 只提供删除确认已在推し箱里的那些（导入失败的绝不删）
         if OriginalDeletion.isOffered {
             originalsToOffer = result.safeIndices.compactMap { items[$0].itemIdentifier }
         }

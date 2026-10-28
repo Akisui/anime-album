@@ -6,10 +6,10 @@
 	     CloudKit 静默推送（其他设备改了数据时在后台拉取） -->
 	<!-- 打开时验证 / 查看隐藏内容时验证（设置 › 隐私） -->
 	<key>NSFaceIDUsageDescription</key>
-	<string>用面容 ID 解锁拾匣和查看隐藏的照片与相簿。</string>
+	<string>用面容 ID 解锁推し箱和查看隐藏的照片与相簿。</string>
 	<!-- 导入后从系统相册删除原图（只在用户选择删除时申请） -->
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>导入后从系统相册删除原图时使用。拾匣只删除你刚导入、并选择删除的那些照片。</string>
+	<string>导入后从系统相册删除原图时使用。推し箱只删除你刚导入、并选择删除的那些照片。</string>
 	<!-- 只用系统自带的加密（HTTPS / iCloud），不需要出口合规文件 -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
